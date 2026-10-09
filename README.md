@@ -49,7 +49,10 @@ make build
 ```
 
 Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
-`current-context` and that context's namespace.
+`current-context`, and the namespace you last used in that context (else the
+context's namespace). kboba remembers that in its own file,
+`~/.config/kboba/state.yaml` (`$XDG_CONFIG_HOME`); it never writes to your
+kubeconfig.
 
 ## Keys
 
@@ -113,6 +116,7 @@ contexts:
 cmd/kboba/          flags, wiring
 internal/k8s/       client-go only: kubeconfig, informer, logs, describe
 internal/ui/        Bubble Tea: root model + one sub-model per view
+internal/state/     kboba's own state file (last namespace per context)
 hack/kind/          sample workloads, RBAC, kubeconfig generator
 ```
 

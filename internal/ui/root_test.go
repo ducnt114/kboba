@@ -777,3 +777,77 @@ func TestSortKeys(t *testing.T) {
 		t.Fatalf("sort should reset: %q %v", m.resources.sortCol, m.resources.sortDesc)
 	}
 }
+
+// fakeMemory is an in-memory NamespaceMemory that counts saves.
+type fakeMemory struct {
+	mu    sync.Mutex
+	ns    map[string]string
+	saves int
+}
+
+func (f *fakeMemory) LastNamespace(ctx string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ns, ok := f.ns[ctx]
+	return ns, ok
+}
+
+func (f *fakeMemory) SetLastNamespace(ctx, ns string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ns[ctx] = ns
+}
+
+func (f *fakeMemory) Save() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves++
+	return nil
+}
+
+func TestRememberedNamespace(t *testing.T) {
+	mem := &fakeMemory{ns: map[string]string{"dev": "kube-system", "prod": ""}}
+
+	m := startModel(t, Options{Memory: mem})
+	if m.namespace != "kube-system" {
+		t.Fatalf("namespace = %q, want the remembered one", m.namespace)
+	}
+	if mem.saves != 0 {
+		t.Fatalf("nothing changed, but saved %d times", mem.saves)
+	}
+
+	m = typeCommand(t, m, "ns team-a")
+	if ns, _ := mem.LastNamespace("dev"); ns != "team-a" || mem.saves != 1 {
+		t.Fatalf("after :ns team-a remembered %q, saves %d", ns, mem.saves)
+	}
+
+	// The other context remembers "all namespaces".
+	m = send(t, m, contextSelectedMsg{name: "prod"})
+	if m.namespace != allNamespaces {
+		t.Fatalf("prod namespace = %q, want all", m.namespace)
+	}
+}
+
+func TestNamespaceFlagBeatsMemory(t *testing.T) {
+	mem := &fakeMemory{ns: map[string]string{"dev": "kube-system"}}
+	m := startModel(t, Options{Memory: mem, Namespace: "flagged"})
+	if m.namespace != "flagged" {
+		t.Fatalf("namespace = %q", m.namespace)
+	}
+	if ns, _ := mem.LastNamespace("dev"); ns != "flagged" || mem.saves != 1 {
+		t.Fatalf("the flag's namespace should be remembered: %q, %d saves", ns, mem.saves)
+	}
+}
+
+func TestStartupWarningShown(t *testing.T) {
+	m := startModel(t, Options{StartupWarning: "parse state: boom"})
+	// The "watching N pods" info that follows must not hide the warning.
+	if m.status != "parse state: boom" || !m.statusIsErr {
+		t.Fatalf("status = %q (err=%v)", m.status, m.statusIsErr)
+	}
+	// After a key press, normal messages take over again.
+	m = typeCommand(t, m, "deploy")
+	if m.status == "parse state: boom" {
+		t.Fatal("warning should give way after the user acted")
+	}
+}

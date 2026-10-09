@@ -11,6 +11,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/ducnt114/kboba/internal/k8s"
+	"github.com/ducnt114/kboba/internal/state"
 	"github.com/ducnt114/kboba/internal/ui"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	var (
 		kubeconfig = flag.String("kubeconfig", "", "path to the kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
 		context    = flag.String("context", "", "kubeconfig context to use (default: current-context)")
-		namespace  = flag.String("namespace", "", "namespace to start in (default: the context's namespace)")
+		namespace  = flag.String("namespace", "", "namespace to start in (default: the one last used in this context, else the context's namespace)")
 	)
 	flag.Parse()
 
@@ -35,7 +36,19 @@ func main() {
 	newClient := func(contextName string) (k8s.Client, error) {
 		return k8s.NewClient(*kubeconfig, contextName)
 	}
-	model := ui.New(newClient, ui.Options{Context: *context, Namespace: *namespace})
+	opts := ui.Options{Context: *context, Namespace: *namespace}
+
+	// Remember the last namespace per context in kboba's own state file
+	// (never in the kubeconfig). Problems here must not stop kboba.
+	if path, err := state.DefaultPath(); err == nil {
+		store, err := state.Open(path)
+		opts.Memory = store
+		if err != nil {
+			opts.StartupWarning = err.Error()
+		}
+	}
+
+	model := ui.New(newClient, opts)
 
 	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "kboba:", err)

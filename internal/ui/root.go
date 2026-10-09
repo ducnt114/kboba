@@ -22,10 +22,24 @@ import (
 // injected so tests can use a fake client.
 type ClientFactory func(contextName string) (k8s.Client, error)
 
+// NamespaceMemory remembers the last namespace used in each context across
+// runs. It is declared here, where it is used, so the UI depends only on
+// these three methods and not on how (or whether) they are stored.
+type NamespaceMemory interface {
+	LastNamespace(context string) (namespace string, ok bool)
+	SetLastNamespace(context, namespace string) // in memory, cheap
+	Save() error                                // slow (disk); run in a tea.Cmd
+}
+
 // Options are the startup settings, usually from command-line flags.
 type Options struct {
 	Context   string // empty: kubeconfig current-context
-	Namespace string // empty: the context's default namespace
+	Namespace string // empty: last used, else the context's default namespace
+	// Memory may be nil: nothing is remembered.
+	Memory NamespaceMemory
+	// StartupWarning is shown in the status bar once connected (e.g. the
+	// state file could not be read).
+	StartupWarning string
 }
 
 type viewID int
@@ -82,6 +96,9 @@ type Model struct {
 
 	status      string
 	statusIsErr bool
+	// statusSticky keeps a startup warning visible until the next key
+	// press: info messages (e.g. "watching 3 pods") don't replace it.
+	statusSticky bool
 
 	width, height int
 	bodyHeight    int
@@ -147,7 +164,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case statusMsg:
-		m.status, m.statusIsErr = msg.text, msg.isErr
+		if m.statusSticky && !msg.isErr {
+			return m, nil
+		}
+		m.status, m.statusIsErr, m.statusSticky = msg.text, msg.isErr, false
 		return m, nil
 
 	case clientReadyMsg:
@@ -219,6 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.statusSticky = false // the user has had a chance to read it
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
 	}
@@ -313,23 +334,59 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	m.client = msg.client
 	m.context = msg.context.Name
 
+	// Precedence: --namespace (startup only) > remembered > context's > "default".
+	remembered, ok := m.lastNamespace(m.context)
 	switch {
 	case firstConnect && m.opts.Namespace != "":
 		m.namespace = m.opts.Namespace
+	case ok:
+		m.namespace = remembered
 	case msg.context.Namespace != "":
 		m.namespace = msg.context.Namespace
 	default:
 		m.namespace = "default"
 	}
+	saveCmd := m.rememberNamespace()
 
 	m.status, m.statusIsErr = fmt.Sprintf("context %q", m.context), false
+	if firstConnect && m.opts.StartupWarning != "" {
+		m.status, m.statusIsErr, m.statusSticky = m.opts.StartupWarning, true, true
+	}
 	var cmd tea.Cmd
 	m.contexts, cmd = m.contexts.Update(contextsLoadedMsg{contexts: msg.contexts})
 	// start stops the previous context's informer before creating a new one.
 	m.nav = nil
 	watchCmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: m.namespace}, "")
 	m.setActive(viewResources)
-	return m, tea.Batch(cmd, watchCmd)
+	return m, tea.Batch(cmd, watchCmd, saveCmd)
+}
+
+func (m Model) lastNamespace(context string) (string, bool) {
+	if m.opts.Memory == nil {
+		return "", false
+	}
+	return m.opts.Memory.LastNamespace(context)
+}
+
+// rememberNamespace records the current namespace for the current context.
+// The in-memory update happens now; writing the file happens in a tea.Cmd.
+// Because every save writes the latest state, saves finishing out of order
+// can't bring back an older namespace.
+func (m Model) rememberNamespace() tea.Cmd {
+	mem := m.opts.Memory
+	if mem == nil {
+		return nil
+	}
+	if ns, ok := mem.LastNamespace(m.context); ok && ns == m.namespace {
+		return nil // unchanged: don't touch the disk
+	}
+	mem.SetLastNamespace(m.context, m.namespace)
+	return func() tea.Msg {
+		if err := mem.Save(); err != nil {
+			return statusMsg{text: "save state: " + err.Error(), isErr: true}
+		}
+		return nil
+	}
 }
 
 func (m Model) switchContext(name string) (tea.Model, tea.Cmd) {
@@ -346,7 +403,7 @@ func (m Model) switchNamespace(ns string) (tea.Model, tea.Cmd) {
 	m.nav = nil
 	cmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: ns}, "")
 	m.setActive(viewResources)
-	return m, cmd
+	return m, tea.Batch(cmd, m.rememberNamespace())
 }
 
 // showResources switches the table to another resource type.

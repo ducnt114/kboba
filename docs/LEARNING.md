@@ -26,6 +26,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 15. [Phase 2.4: Drill-down và navigation stack](#15-phase-24-drill-down-và-navigation-stack)
 16. [Phase 2.5: Sắp xếp cột](#16-phase-25-sắp-xếp-cột)
 17. [Phase 2.6: Tô màu và table tự viết](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết)
+18. [Phase 2.7: Nhớ namespace của mỗi context](#18-phase-27-nhớ-namespace-của-mỗi-context)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -54,6 +55,9 @@ internal/k8s          client-go. KHÔNG import bubbletea
         │
         ▼
    Kubernetes API     chỉ nhận GET (list, watch, get, pods/log)
+
+internal/state        (phase 2.7) file state riêng của kboba, ~/.config/kboba/state.yaml.
+                      KHÔNG import bubbletea; UI dùng nó qua interface NamespaceMemory
 ```
 
 Có hai quy tắc giúp code dễ hiểu và dễ test:
@@ -529,7 +533,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ✅ [mục 15](#15-phase-24-drill-down-và-navigation-stack) |
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ✅ [mục 16](#16-phase-25-sắp-xếp-cột) |
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ✅ [mục 17](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết) |
-| 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ⏳ |
+| 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ✅ [mục 18](#18-phase-27-nhớ-namespace-của-mỗi-context) |
 | 2.8 | Cột CPU/MEM | So sánh poll và informer | ⏳ |
 | 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ⏳ |
 
@@ -1028,4 +1032,81 @@ Thấy ngay vấn đề khi nhìn vào bảng, theo bốn mức:
 | `NotReady` khớp với `Ready`; `Init:Error` khớp với `Init:` | Kiểm tra lỗi trước |
 | Test không thấy màu vì không có TTY | Test mức `health`; kiểm tra màu thật bằng `tmux capture-pane -e` |
 | Ký tự rộng (CJK) làm lệch cột | `ansi.Truncate`/`StringWidth` tính theo ô hiển thị |
+
+## 18. Phase 2.7: Nhớ namespace của mỗi context
+
+### Mục tiêu
+Lần sau mở kboba, hoặc khi chuyển sang lại một context, app tự quay về namespace đã dùng lần trước, kể cả "all namespaces". Dữ liệu được lưu vào **file riêng của kboba** (`$XDG_CONFIG_HOME/kboba/state.yaml`, thường là `~/.config/kboba/state.yaml`), tuyệt đối không ghi vào kubeconfig.
+
+### Học được gì
+- **Interface đặt ở phía dùng (consumer-side interface):** UI khai báo đúng 3 method nó cần (`NamespaceMemory`). Package `state` không biết UI tồn tại, còn UI không biết state được lưu ra sao. Test dùng một fake 20 dòng.
+- **Tách phần nhanh và phần chậm:** cập nhật trong bộ nhớ thì làm ngay trong `Update`; ghi đĩa thì làm trong `tea.Cmd`.
+- **Thứ tự hoàn thành của Cmd không xác định:** hai lần đổi namespace nhanh tạo ra hai Cmd lưu file chạy song song. Nếu mỗi Cmd mang theo giá trị *của nó* thì Cmd cũ có thể ghi đè giá trị mới. Giải pháp: Cmd chỉ "ghi trạng thái hiện tại", nên Cmd nào chạy sau cũng ghi giá trị mới nhất.
+- **Ghi file atomic:** ghi ra file tạm rồi `rename` đè lên file cũ. `rename` là atomic trên cùng một filesystem, nên không bao giờ còn lại một file ghi dở.
+- **"Không có" khác với "rỗng":** `""` nghĩa là all namespaces; key không tồn tại nghĩa là chưa nhớ gì. Map trong Go phân biệt được hai trường hợp này bằng `ns, ok := m[k]`.
+- **Lỗi không chặn khởi động:** file state hỏng không được làm kboba không mở được.
+
+### Thể hiện trong code
+
+**Package `internal/state`** (`state.go`):
+- `Open(path)`:
+  - file không tồn tại thì trả về store rỗng, không lỗi;
+  - file hỏng thì vẫn trả về **store dùng được** *kèm* lỗi, để lần `Save` sau sửa lại file.
+- `LastNamespace` / `SetLastNamespace`: chỉ thao tác trên bộ nhớ, có `sync.Mutex` bảo vệ.
+- `Save()`: dùng `yaml.Marshal` → `MkdirAll(dir, 0o700)` → `os.CreateTemp(dir, ".state-*.yaml")` → write → close → `os.Rename`. `defer os.Remove(tmp)` dọn file tạm nếu có bước nào lỗi; sau khi rename thành công thì lệnh remove này không còn tác dụng gì. Mutex được giữ suốt quá trình ghi, nên các lần `Save` không chồng lên nhau.
+- `DefaultPath()` dùng `os.UserConfigDir()`, nên tôn trọng `$XDG_CONFIG_HOME`.
+
+**Interface ở phía UI** (`internal/ui/root.go`):
+
+```go
+type NamespaceMemory interface {
+    LastNamespace(context string) (namespace string, ok bool)
+    SetLastNamespace(context, namespace string) // in memory, cheap
+    Save() error                                // slow (disk); run in a tea.Cmd
+}
+```
+
+`Options.Memory` có thể là `nil`, nghĩa là không nhớ gì; các test cũ không cần sửa.
+
+**Thứ tự ưu tiên namespace** (`handleClientReady`): `--namespace` (chỉ khi khởi động) > namespace đã nhớ > namespace của context > `"default"`.
+
+**Lưu** (`rememberNamespace`), được gọi sau khi kết nối và sau mỗi `switchNamespace`:
+
+```go
+if ns, ok := mem.LastNamespace(m.context); ok && ns == m.namespace {
+    return nil                                   // không đổi → không đụng đĩa
+}
+mem.SetLastNamespace(m.context, m.namespace)     // ngay, trong Update
+return func() tea.Msg {                          // ghi đĩa trong goroutine của Cmd
+    if err := mem.Save(); err != nil {
+        return statusMsg{text: "save state: " + err.Error(), isErr: true}
+    }
+    return nil
+}
+```
+
+**Cảnh báo khi khởi động** (`Options.StartupWarning`, `statusSticky`): `main.go` truyền lỗi của `state.Open` vào. Nhưng chỉ một giây sau, thông báo info "watching 3 pods" sẽ ghi đè lên, và test đã phát hiện ra đúng lỗi này. Giải pháp: cảnh báo có cờ `statusSticky`. Khi cờ bật, `statusMsg` loại info bị bỏ qua (lỗi mới vẫn ghi đè được). Cờ được xóa ở phím bấm đầu tiên (`handleKey`), tức là khi người dùng đã có cơ hội đọc.
+
+**`main.go`**: nếu `DefaultPath` lỗi (không xác định được thư mục config) thì chạy không có memory; nếu `Open` lỗi thì vẫn dùng store và hiện cảnh báo.
+
+### Test liên quan
+- `internal/state/state_test.go`:
+  - `TestRoundTrip`: thư mục được tạo khi lưu; `""` được nhớ và khác với "không có"; không còn file tạm;
+  - `TestCorruptFileStillUsable`: file hỏng vẫn cho store dùng được, và `Save` sửa lại file;
+  - `TestConcurrentUse`: 20 goroutine cùng `Set` + `Save`.
+- `internal/ui/root_test.go`:
+  - `TestRememberedNamespace`: dùng namespace đã nhớ, không lưu khi không đổi, `:ns` thì lưu, context khác nhớ all namespaces;
+  - `TestNamespaceFlagBeatsMemory`;
+  - `TestStartupWarningShown`: cảnh báo không bị "watching N pods" đè, và nhường chỗ sau phím bấm đầu tiên.
+- Thủ công: `XDG_CONFIG_HOME=<tmp> kboba` → `:ns all` → thoát → chạy lại sẽ mở ở all namespaces; ghi file hỏng thì vẫn mở được và thấy cảnh báo.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Hai Cmd lưu file hoàn thành sai thứ tự làm mất giá trị mới | Cập nhật bộ nhớ trong `Update`; Cmd chỉ ghi trạng thái hiện tại |
+| Ghi dở file khi crash | File tạm + `rename` |
+| `""` (all namespaces) bị coi là "chưa nhớ" | Dùng `ns, ok := map[key]` |
+| File state hỏng làm app không mở được | `Open` trả về store dùng được kèm lỗi |
+| Cảnh báo khởi động bị thông báo info đè ngay lập tức | `statusSticky` cho tới phím bấm đầu tiên |
+| Ghi đĩa mỗi lần khởi động dù không có gì đổi | So sánh trước, không đổi thì không lưu |
 
