@@ -16,7 +16,7 @@ var readOnlyMethods = []string{
 	"ListContexts",
 	"ListNamespaces",
 	"ListPods",
-	"WatchPods",
+	"WatchResources",
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
@@ -81,12 +81,14 @@ func TestClientOnlyReads(t *testing.T) {
 	if _, err := c.GetPod(ctx, "default", "web"); err != nil {
 		t.Fatal(err)
 	}
-	w, err := c.WatchPods("")
-	if err != nil {
-		t.Fatal(err)
+	for _, rt := range ResourceTypes() {
+		w, err := c.WatchResources(rt, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, w.Events, Synced)
+		w.Stop()
 	}
-	nextEvent(t, w.Events, PodsSynced)
-	w.Stop()
 	lines, _, err := c.StreamLogs(ctx, "default", "web", "app")
 	if err != nil {
 		t.Fatal(err)

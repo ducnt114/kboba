@@ -2,7 +2,7 @@
 
 Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi phase làm gì, học được gì, và mỗi ý tưởng nằm ở đâu trong code. Mục đích là để sau này đọc lại code thì hiểu được *tại sao* nó được viết như vậy.
 
-> Thuật ngữ kỹ thuật được giữ nguyên tiếng Anh. Code được tham chiếu theo **file + tên symbol** thay vì số dòng, vì số dòng sẽ thay đổi khi code thay đổi. Dùng `grep -n "func (v podsView) Update" -r internal/` để nhảy tới đúng chỗ.
+> Thuật ngữ kỹ thuật được giữ nguyên tiếng Anh. Code được tham chiếu theo **file + tên symbol** thay vì số dòng, vì số dòng sẽ thay đổi khi code thay đổi. Dùng `grep -n "func (v resourcesView) Update" -r internal/` để nhảy tới đúng chỗ.
 
 ## Mục lục
 
@@ -17,6 +17,10 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 9. [Những cái bẫy đã gặp](#9-những-cái-bẫy-đã-gặp)
 10. [Các phase tiếp theo](#10-các-phase-tiếp-theo)
 11. [Thứ tự đọc code đề xuất](#11-thứ-tự-đọc-code-đề-xuất)
+
+**Phase 2**
+
+12. [Phase 2.1: Resource views](#12-phase-21-resource-views-deployments-services-events-nodes)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -88,7 +92,7 @@ Mỗi màn hình là một sub-model riêng, và tất cả có cùng "hợp đ�
 |------------------|----------------------------|-------------------|
 | `contextsView`   | `internal/ui/contexts.go`   | `list`            |
 | `namespacesView` | `internal/ui/namespaces.go` | `list`            |
-| `podsView`       | `internal/ui/pods.go`       | `table`, `textinput` |
+| `resourcesView`  | `internal/ui/resources.go`  | `table`, `textinput` |
 | `logsView`       | `internal/ui/logs.go`       | `viewport`        |
 | `describeView`   | `internal/ui/describe.go`   | `viewport`        |
 
@@ -182,6 +186,18 @@ Liệt kê namespace, có thêm mục "(all namespaces)", Enter để chọn. Th
 
 Đây là phase quan trọng nhất về mặt kiến trúc.
 
+> **Ghi chú:** ở [phase 2.1](#12-phase-21-resource-views-deployments-services-events-nodes), code của phase này được tổng quát hóa cho nhiều loại resource. Các đoạn code và tên symbol bên dưới dùng **tên hiện tại**. Bảng đổi tên:
+>
+> | Lúc viết phase (c) | Hiện tại |
+> |---|---|
+> | `podsView` (`internal/ui/pods.go`) | `resourcesView` (`internal/ui/resources.go`) |
+> | `WatchPods(ns)` (`internal/k8s/pods.go`) | `WatchResources(rt, ns)` (`internal/k8s/resources.go`) |
+> | `PodEvent`, `PodWatch` | `ResourceEvent`, `ResourceWatch` |
+> | `PodUpserted`/`PodDeleted`/`PodsSynced`/`PodWatchFailed` | `Upserted`/`Deleted`/`Synced`/`WatchFailed` |
+> | `podWatchStartedMsg`, `podEventsMsg`, `podWatchClosedMsg` | `watchStartedMsg`, `resourceEventsMsg`, `watchClosedMsg` |
+>
+> Xem code nguyên bản bằng `git show bcbd957`.
+
 ### Mục tiêu
 Bảng pods tự cập nhật realtime bằng informer, không poll. Đổi context/namespace thì stop informer cũ trước khi tạo cái mới.
 
@@ -194,15 +210,15 @@ Bảng pods tự cập nhật realtime bằng informer, không poll. Đổi cont
 
 ### Thể hiện trong code
 
-#### 4.1 Informer → channel (`internal/k8s/pods.go` → `WatchPods`)
+#### 4.1 Informer → channel (`internal/k8s/resources.go` → `WatchResources`)
 
 ```
 factory := informers.NewSharedInformerFactoryWithOptions(cs, 0, informers.WithNamespace(ns))
-informer := factory.Core().V1().Pods().Informer()
-informer.SetWatchErrorHandler(...)   → PodEvent{Type: PodWatchFailed}
-informer.AddEventHandler(Add/Update/Delete) → PodEvent{PodUpserted | PodDeleted}
+informer := factory.ForResource(rt.gvr).Informer()   // ban đầu: factory.Core().V1().Pods().Informer()
+informer.SetWatchErrorHandler(...)   → ResourceEvent{Type: WatchFailed}
+informer.AddEventHandler(Add/Update/Delete) → ResourceEvent{Upserted | Deleted}  (qua rt.convert)
 factory.Start(stopCh)
-goroutine: WaitForCacheSync → PodEvent{Type: PodsSynced}
+goroutine: WaitForCacheSync → ResourceEvent{Type: Synced}
 ```
 
 Những điểm cần chú ý:
@@ -223,27 +239,27 @@ Những điểm cần chú ý:
 
   Nếu đóng `events` khi handler còn có thể gửi vào, chương trình sẽ panic (`send on closed channel`). Nếu không bao giờ đóng, Cmd đang chờ trên channel bị kẹt mãi, tức là leak goroutine. Bước 2–4 chạy trong goroutine để `Stop()` không block `Update`. `sync.Once` giúp `Stop` gọi nhiều lần vẫn an toàn.
 
-- **`PodWatch` là struct có field hàm** (`Events`, `Stop func()`) thay vì có method. Nhờ vậy test UI tự tạo được một `PodWatch` giả mà không cần constructor.
+- **`ResourceWatch` là struct có field hàm** (`Events`, `Stop func()`) thay vì có method. Nhờ vậy test UI tự tạo được một `ResourceWatch` giả mà không cần constructor.
 
-#### 4.2 Channel → message của Bubble Tea (`internal/ui/pods.go`)
+#### 4.2 Channel → message của Bubble Tea (`internal/ui/resources.go`)
 
 Pattern "chờ một message rồi đăng ký lại" (subscription):
 
 ```go
-func waitForPodEvents(w *k8s.PodWatch, gen int) tea.Cmd {
+func waitForResourceEvents(w *k8s.ResourceWatch, gen int) tea.Cmd {
     return func() tea.Msg {
         events, ok := receiveBatch(w.Events, 500)   // block ở goroutine của Cmd, không phải Update
         if !ok {
-            return podWatchClosedMsg{gen: gen}
+            return watchClosedMsg{gen: gen}
         }
-        return podEventsMsg{events: events, gen: gen}
+        return resourceEventsMsg{events: events, gen: gen}
     }
 }
 
 // trong Update:
-case podEventsMsg:
-    ... áp dụng events vào v.pods ...
-    return v, tea.Batch(status, waitForPodEvents(v.watch, v.gen)) // đăng ký lại
+case resourceEventsMsg:
+    ... áp dụng events vào v.items ...
+    return v, tea.Batch(status, waitForResourceEvents(v.watch, v.gen)) // đăng ký lại
 ```
 
 Mỗi lần nhận một batch, `Update` trả về một Cmd mới để chờ batch tiếp theo. Vì vậy luôn có **đúng một** Cmd đang chờ trên channel.
@@ -252,30 +268,30 @@ Mỗi lần nhận một batch, `Update` trả về một Cmd mới để chờ 
 
 #### 4.3 Generation counter: chống message cũ
 
-`podsView` có field `gen int`. Mọi message của watch mang theo `gen`:
+`resourcesView` có field `gen int`. Mọi message của watch mang theo `gen`:
 
 ```
-start():  stop()  →  gen++  →  Cmd(WatchPods) → podWatchStartedMsg{gen}
+start():  stop()  →  gen++  →  Cmd(WatchResources) → watchStartedMsg{gen}
 Update:   msg.gen != v.gen  →  bỏ qua message
 ```
 
-Tình huống nó giải quyết: bạn đổi namespace từ `a` sang `b`. Nhưng một `podEventsMsg` của `a` đã nằm sẵn trong hàng đợi message của Bubble Tea, nên `stop()` không thu hồi được nó. Nếu không có `gen`, pod của `a` sẽ lọt vào bảng của `b`.
+Tình huống nó giải quyết: bạn đổi namespace từ `a` sang `b`. Nhưng một `resourceEventsMsg` của `a` đã nằm sẵn trong hàng đợi message của Bubble Tea, nên `stop()` không thu hồi được nó. Nếu không có `gen`, pod của `a` sẽ lọt vào bảng của `b`.
 
-Một trường hợp đặc biệt cần xử lý thêm: nếu `podWatchStartedMsg` đến với `gen` cũ, tức là người dùng đã đổi namespace *trước khi* watch kịp khởi động, thì phải gọi `msg.watch.Stop()`. Nếu không, informer đó chạy mãi mà không ai dừng.
+Một trường hợp đặc biệt cần xử lý thêm: nếu `watchStartedMsg` đến với `gen` cũ, tức là người dùng đã đổi namespace *trước khi* watch kịp khởi động, thì phải gọi `msg.watch.Stop()`. Nếu không, informer đó chạy mãi mà không ai dừng.
 
 #### 4.4 Đổi context/namespace
 
 Trong `internal/ui/root.go`:
-- `switchNamespace` gọi `m.pods.start(m.client, ns)`.
-- `handleClientReady` (sau khi đổi context) cũng gọi `m.pods.start(...)`.
+- `switchNamespace` gọi `m.resources.start(m.client, m.resources.rt, ns)`.
+- `handleClientReady` (sau khi đổi context) cũng gọi `m.resources.start(...)`.
 
 Bên trong, `start()` gọi `stop()` trước tiên, nên informer cũ luôn được dừng *trước khi* informer mới được tạo.
 
-Các message của watch (`podWatchStartedMsg`, `podEventsMsg`, `podWatchClosedMsg`, `ageTickMsg`) luôn được root chuyển cho `m.pods`, **dù view nào đang active**. Nhờ vậy khi bạn đang xem logs, bảng pods vẫn được cập nhật ở phía sau.
+Các message của watch (`watchStartedMsg`, `resourceEventsMsg`, `watchClosedMsg`, `ageTickMsg`) luôn được root chuyển cho `m.resources`, **dù view nào đang active**. Nhờ vậy khi bạn đang xem logs, bảng pods vẫn được cập nhật ở phía sau.
 
 #### 4.5 Format giống kubectl (`internal/k8s/pods.go`)
 
-- `NewPodInfo` chuyển `*corev1.Pod` thành `PodInfo`: READY (`ready/total`), RESTARTS (tổng của các container), danh sách container và `DefaultContainer` (đọc từ annotation `kubectl.kubernetes.io/default-container`).
+- `NewPodInfo` (vẫn ở `internal/k8s/pods.go`) chuyển `*corev1.Pod` thành `PodInfo`: READY (`ready/total`), RESTARTS (tổng của các container), danh sách container và `DefaultContainer` (đọc từ annotation `kubectl.kubernetes.io/default-container`).
 - `podStatus` là bản rút gọn logic của kubectl, theo thứ tự ưu tiên:
   1. `Terminating` (nếu có `DeletionTimestamp`);
   2. init container chưa xong (`Init:Error`, `Init:1/2`…);
@@ -284,7 +300,7 @@ Các message của watch (`podWatchStartedMsg`, `podEventsMsg`, `podWatchClosedM
 
 Đây là logic thuần nên được test kỹ trong `pods_test.go` → `TestPodStatus`.
 
-#### 4.6 Table (`internal/ui/pods.go`)
+#### 4.6 Table (`internal/ui/resources.go`)
 
 - `setColumns`: cột NAME lấy phần chiều rộng còn lại, cột NAMESPACE chỉ hiện khi đang xem all namespaces. Trước khi `SetColumns` phải `SetRows(nil)`, vì table sẽ index `row[i]` theo số cột. Đổi từ 5 lên 6 cột mà rows cũ chỉ có 5 cell sẽ gây panic.
 - `setRows(selectedKey)`: rebuild các row từ map, áp dụng filter, sort theo `namespace/name`, và **giữ cursor trên đúng pod** bằng key thay vì index. `rowKeys` song song với rows để tra ngược từ cursor ra `PodInfo`.
@@ -299,7 +315,7 @@ Các message của watch (`podWatchStartedMsg`, `podEventsMsg`, `podWatchClosedM
 - `readonly-kubeconfig.sh` sinh kubeconfig dùng token của các SA trên, thêm một context trỏ tới endpoint chết để thử lỗi kết nối.
 
 ### Test liên quan
-- `internal/k8s/pods_test.go`: `TestPodStatus` (bảng case), `TestNewPodInfo`, `TestWatchPods` (tạo/xóa pod trên fake clientset, kiểm tra event, kiểm tra `Stop` đóng channel).
+- `internal/k8s/pods_test.go`: `TestPodStatus` (bảng case), `TestNewPodInfo`, `TestWatchResourcesPods` trong `resources_test.go` (tạo/xóa pod trên fake clientset, kiểm tra event, kiểm tra `Stop` đóng channel).
 - `internal/ui/root_test.go`: `TestPodsWatchLifecycle` (đổi ns thì watch cũ bị stop, event có `gen` cũ bị bỏ qua, có cột NAMESPACE), `TestPodsWatchStoppedOnContextSwitch`, `TestPodsFilter`.
 - `internal/ui/format_test.go`: `TestReceiveBatch`.
 
@@ -349,7 +365,7 @@ go func() {
 
 - `open` gọi `restart()`. `restart` làm các bước: `stop()` (cancel stream cũ) → `gen++` → reset buffer → tạo `ctx, cancel` mới → trả về Cmd gọi `StreamLogs`.
 - `waitForLogLines` dùng lại đúng pattern subscription và `receiveBatch` của phase (c).
-- View lưu `lines`/`errs` của stream hiện tại vào field, để `Update` đăng ký lại (giống `podsView.watch`).
+- View lưu `lines`/`errs` của stream hiện tại vào field, để `Update` đăng ký lại (giống `resourcesView.watch`).
 - **Cancel khi rời view:** đặt ở *một chỗ duy nhất*, `Model.setActive` trong `root.go`:
 
   ```go
@@ -421,7 +437,7 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 **Help** (`internal/ui/keys.go`):
 - `helpKeys` implement `help.KeyMap`: `ShortHelp` = phím của view + phím global, `FullHelp` = 3 cột.
 - `?` bật/tắt `help.ShowAll`, sau đó gọi `layout()` vì chiều cao help bar thay đổi.
-- Pods view chỉ hiện `esc clear filter` khi đang có filter (`podsView.keys`).
+- Pods view chỉ hiện `esc clear filter` khi đang có filter (`resourcesView.keys`).
 
 **Layout** (`Model.layout` và `Model.View`): chiều cao body = chiều cao cửa sổ − header − status − help. Body được ép đúng chiều cao (`Height` + `MaxHeight`) để status bar và help bar luôn nằm sát đáy, không bị nhảy lên khi danh sách ngắn.
 
@@ -435,11 +451,11 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 
 | Pattern | Ý tưởng | Ở đâu |
 |---|---|---|
-| **Không block trong `Update`** | Mọi I/O đều nằm trong một `tea.Cmd` | `connect`, `loadContexts`, `loadNamespaces`, `podsView.start`, `logsView.restart`, `describeView.load` |
-| **Subscription channel → Msg** | Cmd chờ channel, `Update` xử lý xong thì trả về Cmd chờ tiếp | `waitForPodEvents`, `waitForLogLines` |
+| **Không block trong `Update`** | Mọi I/O đều nằm trong một `tea.Cmd` | `connect`, `loadContexts`, `loadNamespaces`, `resourcesView.start`, `logsView.restart`, `describeView.load` |
+| **Subscription channel → Msg** | Cmd chờ channel, `Update` xử lý xong thì trả về Cmd chờ tiếp | `waitForResourceEvents`, `waitForLogLines` |
 | **Batching** | Chờ 1 phần tử, lấy thêm những gì có sẵn | `receiveBatch` (`stream.go`) |
-| **Generation / key guard** | Message mang theo "phiên"; phiên cũ thì bỏ qua | `podsView.gen`, `logsView.gen`, `describeLoadedMsg.key` |
-| **Stop rồi mới close** | Đóng stop channel → chờ producer thoát → đóng data channel | `WatchPods` (closure `stop`), `StreamLogs` (defer) |
+| **Generation / key guard** | Message mang theo "phiên"; phiên cũ thì bỏ qua | `resourcesView.gen`, `logsView.gen`, `describeLoadedMsg.key` |
+| **Stop rồi mới close** | Đóng stop channel → chờ producer thoát → đóng data channel | `WatchResources` (closure `stop`), `StreamLogs` (defer) |
 | **Một chỗ cleanup** | Rời logs view luôn đi qua `setActive` | `Model.setActive` |
 | **Con báo, cha quyết** | View phát message ý định; root đổi state | `contextSelectedMsg`, `namespaceSelectedMsg`, `openLogsMsg`, `openDescribeMsg`, `backMsg` |
 | **Lỗi lên status bar** | View trả về `reportErr(err)`, root hiển thị | `messages.go` → `statusMsg`, `reportErr`, `reportInfo` |
@@ -448,7 +464,7 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 
 ### Vì sao sub-model dùng value receiver cho `Update`?
 
-`func (v podsView) Update(msg) (podsView, tea.Cmd)` trả về một bản copy mới, đúng tinh thần Elm (state bất biến). Root gán lại: `m.pods, cmd = m.pods.Update(msg)`. Các helper thay đổi state như `start`, `stop`, `SetSize` dùng pointer receiver và chỉ được gọi trên bản copy cục bộ của root (`m` trong `Update` là biến cục bộ, có thể lấy địa chỉ). Lưu ý: map và slice bên trong vẫn chia sẻ vùng nhớ giữa các bản copy. Điều này ổn vì bản copy cũ luôn bị bỏ đi ngay sau mỗi `Update`.
+`func (v resourcesView) Update(msg) (resourcesView, tea.Cmd)` trả về một bản copy mới, đúng tinh thần Elm (state bất biến). Root gán lại: `m.resources, cmd = m.resources.Update(msg)`. Các helper thay đổi state như `start`, `stop`, `SetSize` dùng pointer receiver và chỉ được gọi trên bản copy cục bộ của root (`m` trong `Update` là biến cục bộ, có thể lấy địa chỉ). Lưu ý: map và slice bên trong vẫn chia sẻ vùng nhớ giữa các bản copy. Điều này ổn vì bản copy cũ luôn bị bỏ đi ngay sau mỗi `Update`.
 
 ---
 
@@ -457,12 +473,12 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 ### `internal/k8s`: fake clientset
 - `newFakeClient(t, objs...)` (`fake_test.go`) tạo `client` từ `fake.NewSimpleClientset`.
 - Fake ghi lại mọi request vào `cs.Actions()`, và đây là nền tảng của `TestClientOnlyReads`.
-- Fake **hỗ trợ watch**, nên `TestWatchPods` chạy informer thật trên fake. Test tạo/xóa pod qua fake để giả lập hoạt động của cluster; đây là thao tác ghi lên *fake*, không phải do kboba thực hiện.
+- Fake **hỗ trợ watch**, nên `TestWatchResourcesPods` chạy informer thật trên fake. Test tạo/xóa pod qua fake để giả lập hoạt động của cluster; đây là thao tác ghi lên *fake*, không phải do kboba thực hiện.
 - Fake `GetLogs` trả về body cố định `"fake logs"`.
 
 ### `internal/ui`: fake `k8s.Client`
 - `fakeClient` trong `root_test.go` implement đủ 7 method:
-  - `WatchPods` trả về channel đã nạp sẵn event, và ghi nhận `stopped`;
+  - `WatchResources` trả về channel đã nạp sẵn event, và ghi nhận `stopped`;
   - `StreamLogs` lưu lại `ctx` để kiểm tra việc cancel.
 - Helper `send(t, m, msg)` gọi `Update`, chạy các Cmd trả về, đưa message kết quả trở lại `Update` (đệ quy tối đa 5 cấp).
 - `runCmd` chạy Cmd trong goroutine với **timeout 50ms**. Những Cmd không xong ngay sẽ bị bỏ qua: con trỏ nhấp nháy của textinput (có sleep), tick 5 giây, hay Cmd đang chờ channel. Đây là lý do test UI mất vài giây.
@@ -481,12 +497,12 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 |---|---|---|
 | `list` tự xử lý Quit | `q`/`esc` trong list trả về `tea.Quit` | Tắt `KeyMap.Quit`, `KeyMap.ForceQuit` trong `newList` |
 | viewport gán `f` cho PageDown | `f` không bật/tắt follow mà lật trang | Định nghĩa lại `vp.KeyMap.PageDown` |
-| table gán `d` cho half page down | (có thể nuốt phím describe) | `podsView.handleKey` kiểm tra phím describe trước khi chuyển cho table |
+| table gán `d` cho half page down | (có thể nuốt phím describe) | `resourcesView.handleKey` kiểm tra phím describe trước khi chuyển cho table |
 | klog ghi ra stderr | Log của client-go in đè lên TUI | `klog.SetLogger(logr.Discard())` |
 | Đóng channel khi handler còn gửi | panic `send on closed channel` | `close(stopCh)` → `Shutdown()` → `close(events)` |
 | Không đóng channel events | Cmd chờ bị kẹt mãi, leak goroutine | `Stop` luôn đóng `events` sau khi shutdown |
 | Message stale sau khi đổi ns | Pod của namespace cũ lọt vào bảng | Generation counter |
-| Watch khởi động sau khi đã đổi ns | Informer mồ côi chạy mãi | Gặp `podWatchStartedMsg` có `gen` cũ thì gọi `Stop()` |
+| Watch khởi động sau khi đã đổi ns | Informer mồ côi chạy mãi | Gặp `watchStartedMsg` có `gen` cũ thì gọi `Stop()` |
 | `SetColumns` khi rows có ít cell hơn số cột | panic index out of range | `SetRows(nil)` trước `SetColumns` |
 | `bufio.Scanner` mặc định 64KB/dòng | Dòng log dài làm stream dừng | `sc.Buffer(..., 1MB)` |
 | Context không tồn tại | Mất client hiện tại | `connect` trả lỗi kèm danh sách context; giữ client cũ |
@@ -498,24 +514,24 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 
 ## 10. Các phase tiếp theo
 
-Thứ tự đề xuất: **1 → 3 → 4 → 2 → 6 → 8 → 9**. Mọi tính năng vẫn giữ nguyên tắc read-only.
+Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commit. Mọi tính năng vẫn giữ nguyên tắc read-only. Chi tiết của các phase đã xong nằm ở mục 12 trở đi.
 
-| # | Tính năng | Học được gì | Gợi ý triển khai |
+| Phase | Tính năng | Học được gì | Trạng thái |
 |---|---|---|---|
-| 1 | View cho Deployments, Services, Events, Nodes | Tạo abstraction sau khi đã có ví dụ thật; một informer phục vụ nhiều consumer | Tách `podsView` thành `resourceView` nhận vào: danh sách cột, hàm object → row, hàm tạo informer |
-| 2 | Drill-down Deployment → Pods | Navigation stack trong Elm | Thay `backMsg` → `viewPods` bằng một stack; dùng `informers.WithTweakListOptions` để lọc theo label selector |
-| 3 | Xem YAML (`y`) | Serialize object, highlight cú pháp | `sigs.k8s.io/yaml` + `alecthomas/chroma`; lọc bỏ `managedFields` |
-| 4 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | `PodLogOptions.Timestamps`, `Previous: true` (rất hữu ích với pod crashloop) |
-| 5 | Sắp xếp cột | Logic thuần, dễ test | Sort trong `setRows` theo một `sortKey` |
-| 6 | Tô màu theo status | Giới hạn của component có sẵn | bubbles `table` cắt chuỗi theo độ dài nên lệch cột khi có ANSI; cân nhắc `lipgloss/table` hoặc tự render row |
-| 7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | `~/.config/kboba/state.yaml`, không phải kubeconfig |
-| 8 | Cột CPU/MEM | So sánh poll và informer | `k8s.io/metrics`; metrics không có watch nên phải dùng `tea.Tick`; xử lý trường hợp không có metrics-server |
-| 9 | CRD qua dynamic client | Discovery API, `unstructured` | `dynamic.Interface`, `dynamicinformer`, `additionalPrinterColumns` |
-| 10 | Kiểm tra quyền trước (SelfSubjectAccessReview) | Authorization API | Là verb `create`; cần thêm ngoại lệ có chủ đích cho test read-only và transport |
+| 2.1 | View cho Deployments, Services, Events, Nodes | Tạo abstraction sau khi đã có ví dụ thật; generic informer | ✅ [mục 12](#12-phase-21-resource-views-deployments-services-events-nodes) |
+| 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ⏳ |
+| 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ⏳ |
+| 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ⏳ |
+| 2.5 | Sắp xếp cột | Logic thuần, dễ test | ⏳ |
+| 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ⏳ |
+| 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ⏳ |
+| 2.8 | Cột CPU/MEM | So sánh poll và informer | ⏳ |
+| 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ⏳ |
 
-**Không làm:** exec, port-forward, edit, delete, scale (vi phạm read-only); plugin system và theme config (tốn công nhưng học được ít).
-
----
+**Không làm:**
+- SelfSubjectAccessReview: là verb `create`, cần bạn quyết định có nới lỏng guard read-only hay không.
+- exec, port-forward, edit, delete, scale: vi phạm read-only.
+- Plugin system, theme config: tốn công nhưng học được ít.
 
 ## 11. Thứ tự đọc code đề xuất
 
@@ -523,7 +539,108 @@ Thứ tự đề xuất: **1 → 3 → 4 → 2 → 6 → 8 → 9**. Mọi tính 
 2. `internal/k8s/client.go`: interface `Client`, `NewClient`, `readOnlyTransport`.
 3. `internal/ui/root.go`: `Model`, `Update` (phần định tuyến message), `handleKey`, `setActive`, `layout`.
 4. `internal/ui/contexts.go` + `listview.go`: sub-model đơn giản nhất.
-5. `internal/k8s/pods.go` → `WatchPods`, đọc song song với `internal/ui/pods.go` → `start`, `waitForPodEvents`, `Update`. Đây là phần cốt lõi.
+5. `internal/k8s/resources.go` → `WatchResources`, đọc song song với `internal/ui/resources.go` → `start`, `waitForResourceEvents`, `Update`. Đây là phần cốt lõi.
 6. `internal/ui/stream.go` → `receiveBatch`.
 7. `internal/k8s/logs.go` song song với `internal/ui/logs.go` để thấy lại cùng pattern ở một nguồn dữ liệu khác.
 8. `internal/k8s/readonly_test.go` và `internal/ui/root_test.go`: cách các bất biến quan trọng được khóa lại bằng test.
+
+---
+
+# Phase 2
+
+## 12. Phase 2.1: Resource views (Deployments, Services, Events, Nodes)
+
+### Mục tiêu
+Thêm `:deploy`, `:svc`, `:events`, `:nodes` bên cạnh `:pods`, dùng chung **một** bảng live và **một** hàm watch, thay vì nhân bản code của pods cho từng loại resource.
+
+### Học được gì
+- **Tạo abstraction khi đã có ví dụ thật.** `podsView` đã chạy ổn từ phase (c), nên lúc này ta biết chính xác phần nào là chung (informer, gen, filter, table, cursor, AGE) và phần nào thay đổi theo loại resource (cột, cách biến object thành row).
+- **Generic informer:** `factory.ForResource(gvr)` trả về informer cho bất kỳ resource built-in nào, chỉ cần `GroupVersionResource`.
+- **Generics của Go cho type assertion:** hàm `typed[T]` biến một converter có kiểu cụ thể thành converter nhận `any`.
+- **Resource cluster-scoped và namespaced:** nodes bỏ qua namespace và không có cột NAMESPACE.
+
+### Thể hiện trong code
+
+**Mô tả một loại resource bằng dữ liệu** (`internal/k8s/resources.go` → `ResourceType`):
+
+```go
+Deployments = &ResourceType{
+    Name: "deployments", Title: "Deployments", Aliases: []string{"deployment", "deploy", "dp"}, Namespaced: true,
+    Columns: []Column{{"NAME", 0}, {"READY", 9}, {"UP-TO-DATE", 10}, {"AVAILABLE", 9}},
+    gvr:     appsv1.SchemeGroupVersion.WithResource("deployments"),
+    convert: typed(deploymentResource),
+}
+```
+
+- Muốn thêm một loại resource mới chỉ cần thêm **một giá trị** `ResourceType` và một hàm convert. UI không phải sửa gì.
+- `Columns` chỉ chứa các cột riêng của loại đó. UI tự thêm NAMESPACE (khi xem all namespaces và resource là namespaced) và AGE. Cột có `Width 0` là cột co giãn: thường là NAME, còn với events là MESSAGE.
+- `gvr` và `convert` là field **unexported**: UI không thể (và không cần) biết client-go được gọi thế nào. Fake client trong test UI chỉ dùng `Name`.
+- `ResourceTypes()` và `LookupResourceType(alias)` là registry; lệnh `:deploy`, `:svc`, ... được giải quyết qua `LookupResourceType` trong `Model.runCommand`.
+
+**Một row chung cho mọi loại** (`Resource`): `Namespace`, `Name`, `Created` (dùng cho AGE; với event là "last seen"), `Cells` (một cell cho mỗi cột). Riêng pod có thêm `Pod *PodInfo`, vì logs view và describe view cần danh sách container.
+
+**Converter** (`podResource`, `deploymentResource`, `serviceResource`, `eventResource`, `nodeResource`):
+- Đây là các hàm thuần, nhận object có kiểu và trả về `Resource`.
+- Hàm `newResource(meta, cells...)` điền các phần chung từ `metav1.Object`.
+- Format giống kubectl: `servicePorts` tạo chuỗi `443:30443/TCP`; `serviceExternalIP` trả `<pending>` cho LoadBalancer chưa có IP; `nodeRoles` đọc các label `node-role.kubernetes.io/*`.
+
+**`typed[T]`:**
+
+```go
+func typed[T any](f func(T) Resource) func(any) (Resource, bool) {
+    return func(obj any) (Resource, bool) {
+        o, ok := obj.(T)
+        if !ok {
+            return Resource{}, false
+        }
+        return f(o), true
+    }
+}
+```
+
+Informer gọi handler với `any`. `typed` gom phần type assertion lặp lại vào một chỗ; nếu object sai kiểu thì trả `false` thay vì panic.
+
+**Watch generic** (`WatchResources`): giống hệt `WatchPods` cũ, chỉ khác ở hai dòng:
+
+```go
+generic, err := factory.ForResource(rt.gvr)     // thay cho factory.Core().V1().Pods()
+...
+sendObj := func(typ ResourceEventType, obj any) {
+    if r, ok := rt.convert(obj); ok { send(ResourceEvent{Type: typ, Resource: r}) }
+}
+```
+
+Mọi thứ đã học ở phase (c), như thứ tự dừng, tombstone, `SetWatchErrorHandler` và `send` có select trên `stopCh`, được giữ nguyên và giờ áp dụng cho mọi loại resource.
+
+**Phía UI** (`internal/ui/resources.go` → `resourcesView`):
+- `start(client, rt, namespace)` thay cho `start(client, namespace)`. Đổi loại resource cũng giống đổi namespace: stop → `gen++` → watch mới. Filter bị xóa khi đổi loại, vì filter tên pod hiếm khi có nghĩa với nodes.
+- `setColumns` ghép `[NAMESPACE] + rt.Columns + AGE`, rồi tìm cột `Width 0` để chia phần chiều rộng còn lại.
+- `setRows` ghép `[r.Namespace] + r.Cells + age`. Phần này không còn biết gì về pod.
+- Hành động riêng của pod (Enter để xem logs, `d` để describe) chỉ hoạt động khi `v.rt == k8s.Pods`, và help bar chỉ hiện các phím đó khi đang ở pods (`resourcesView.keys`).
+
+**Root** (`internal/ui/root.go`):
+- `showResources(rt)` chỉ khởi động watch mới khi loại resource thay đổi; nếu không, nó chỉ chuyển view.
+- `switchNamespace` và `handleClientReady` giữ nguyên loại resource đang xem (`m.resources.rt`). Vì vậy `:ns all` khi đang ở deployments sẽ cho deployments của mọi namespace.
+
+**Interface `k8s.Client`:** `WatchPods` được thay bằng `WatchResources`. Allowlist trong `readonly_test.go` được cập nhật, và `TestClientOnlyReads` chạy `WatchResources` cho **mọi** `ResourceType`. Thêm một loại resource mới vào registry thì nó tự động được kiểm tra read-only.
+
+**RBAC kind** (`hack/kind/rbac.yaml`): ClusterRole thêm `services`, `nodes` và `apps/deployments, replicasets` (vẫn chỉ get/list/watch). Role của `kboba-limited` không có `nodes`, nên `:nodes` với context này sẽ thấy lỗi forbidden. `demo.yaml` thêm Deployment `web` và Service `web`.
+
+### Test liên quan
+- `internal/k8s/resources_test.go`:
+  - `TestEveryTypeHasMatchingCells`: số cell khớp số cột cho **mọi** type, nhờ đó tránh được panic của table;
+  - `TestDeploymentCells`, `TestServiceCells`, `TestNodeCells`, `TestEventCellsUseLastSeen`: các converter;
+  - `TestWatchResourcesPods`, `TestWatchResourcesClusterScopedIgnoresNamespace`: watch generic;
+  - `TestLookupResourceType`: tra theo tên và alias.
+- `internal/ui/root_test.go`:
+  - `TestSwitchResourceType`: watch cũ bị stop; Enter trên deployment không mở logs; `:ns all` giữ nguyên type;
+  - `TestClusterScopedHasNoNamespaceColumn`;
+  - `TestUnknownResourceCommand`.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Số cell khác số cột làm table panic | `TestEveryTypeHasMatchingCells` khóa lại cho mọi type |
+| Nodes là cluster-scoped, `WithNamespace("x")` sẽ không trả về gì | `WatchResources` ép `namespace = ""` khi `!rt.Namespaced`; UI không hiện cột NAMESPACE |
+| AGE của event theo `CreationTimestamp` gây hiểu nhầm (event được gộp và lặp lại) | `eventResource` đặt `Created = eventTime(ev)` (last seen) |
+

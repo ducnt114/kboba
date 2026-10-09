@@ -55,3 +55,36 @@ spec:
   containers:
     - name: app
       image: example.invalid/does-not-exist:latest
+---
+# A Deployment (with its ReplicaSet and pods) and a Service in front of it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: kboba-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: busybox:1.36
+          command: ["sh", "-c", "while true; do echo serving request $RANDOM; sleep 3; done"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: kboba-demo
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080

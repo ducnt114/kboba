@@ -30,9 +30,10 @@ type Client interface {
 	// ListPods returns the pods of namespace ("" for all), sorted.
 	ListPods(ctx context.Context, namespace string) ([]PodInfo, error)
 
-	// WatchPods starts an informer that streams pod changes in namespace
-	// ("" for all). The caller must call Stop on the returned watch.
-	WatchPods(namespace string) (*PodWatch, error)
+	// WatchResources starts an informer that streams changes of one
+	// resource type in namespace ("" for all). The caller must call Stop on
+	// the returned watch.
+	WatchResources(rt *ResourceType, namespace string) (*ResourceWatch, error)
 
 	// GetPod returns a single pod.
 	GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error)

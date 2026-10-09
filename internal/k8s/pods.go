@@ -4,13 +4,10 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/tools/cache"
 )
 
 // defaultContainerAnnotation is the annotation kubectl uses to choose the
@@ -150,114 +147,4 @@ func (c *client) GetPod(ctx context.Context, namespace, name string) (*corev1.Po
 		return nil, c.connErr
 	}
 	return c.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-}
-
-// PodEventType says what a PodEvent means.
-type PodEventType int
-
-const (
-	PodUpserted    PodEventType = iota // a pod was added or changed
-	PodDeleted                         // a pod is gone
-	PodsSynced                         // the initial list has been delivered
-	PodWatchFailed                     // listing/watching failed; Err is set. The informer keeps retrying.
-)
-
-// PodEvent is one change delivered by a PodWatch.
-type PodEvent struct {
-	Type PodEventType
-	Pod  PodInfo
-	Err  error
-}
-
-// PodWatch is a running pod informer.
-type PodWatch struct {
-	// Events delivers changes. It is closed after Stop, once the informer
-	// has fully shut down, so readers blocked on it are released.
-	Events <-chan PodEvent
-	// Stop shuts the informer down. It is safe to call more than once and
-	// never blocks.
-	Stop func()
-}
-
-// WatchPods starts a pod informer for namespace ("" means all namespaces).
-// The informer first lists the pods (delivered as PodUpserted events,
-// followed by PodsSynced) and then watches for changes.
-func (c *client) WatchPods(namespace string) (*PodWatch, error) {
-	if c.connErr != nil {
-		return nil, c.connErr
-	}
-
-	events := make(chan PodEvent, 256)
-	stopCh := make(chan struct{})
-
-	// send never blocks forever: once stopCh is closed it gives up.
-	send := func(ev PodEvent) {
-		select {
-		case events <- ev:
-		case <-stopCh:
-		}
-	}
-
-	factory := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0, informers.WithNamespace(namespace))
-	informer := factory.Core().V1().Pods().Informer()
-
-	// Without this, list/watch errors (e.g. RBAC forbidden) would only be
-	// logged by client-go.
-	err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-		send(PodEvent{Type: PodWatchFailed, Err: err})
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if pod, ok := obj.(*corev1.Pod); ok {
-				send(PodEvent{Type: PodUpserted, Pod: NewPodInfo(pod)})
-			}
-		},
-		UpdateFunc: func(_, obj any) {
-			if pod, ok := obj.(*corev1.Pod); ok {
-				send(PodEvent{Type: PodUpserted, Pod: NewPodInfo(pod)})
-			}
-		},
-		DeleteFunc: func(obj any) {
-			// When the watch missed the delete, we get a tombstone.
-			if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-				obj = tomb.Obj
-			}
-			if pod, ok := obj.(*corev1.Pod); ok {
-				send(PodEvent{Type: PodDeleted, Pod: NewPodInfo(pod)})
-			}
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	factory.Start(stopCh)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if cache.WaitForCacheSync(stopCh, informer.HasSynced) {
-			send(PodEvent{Type: PodsSynced})
-		}
-	}()
-
-	var once sync.Once
-	stop := func() {
-		once.Do(func() {
-			close(stopCh)
-			// Shutdown waits for the informer goroutines (and therefore our
-			// handlers) to exit. Only then is it safe to close events.
-			go func() {
-				factory.Shutdown()
-				wg.Wait()
-				close(events)
-			}()
-		})
-	}
-	return &PodWatch{Events: events, Stop: stop}, nil
 }

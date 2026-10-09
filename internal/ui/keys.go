@@ -51,7 +51,13 @@ func (h helpKeys) FullHelp() [][]key.Binding {
 		{
 			key.NewBinding(key.WithKeys(":ctx"), key.WithHelp(":ctx [name]", "contexts")),
 			key.NewBinding(key.WithKeys(":ns"), key.WithHelp(":ns [name]", "namespaces")),
+		},
+		{
 			key.NewBinding(key.WithKeys(":pods"), key.WithHelp(":pods", "pods")),
+			key.NewBinding(key.WithKeys(":deploy"), key.WithHelp(":deploy", "deployments")),
+			key.NewBinding(key.WithKeys(":svc"), key.WithHelp(":svc", "services")),
+			key.NewBinding(key.WithKeys(":ev"), key.WithHelp(":ev", "events")),
+			key.NewBinding(key.WithKeys(":no"), key.WithHelp(":no", "nodes")),
 		},
 	}
 }

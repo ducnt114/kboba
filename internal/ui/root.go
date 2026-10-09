@@ -31,7 +31,7 @@ type Options struct {
 type viewID int
 
 const (
-	viewPods viewID = iota
+	viewResources viewID = iota
 	viewContexts
 	viewNamespaces
 	viewLogs
@@ -60,7 +60,7 @@ type Model struct {
 	active     viewID
 	contexts   contextsView
 	namespaces namespacesView
-	pods       podsView
+	resources  resourcesView
 	logs       logsView
 	describe   describeView
 
@@ -79,15 +79,15 @@ type Model struct {
 func New(newClient ClientFactory, opts Options) Model {
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = "ctx | ns | pods | quit"
+	ti.Placeholder = "pods | deploy | svc | events | nodes | ctx | ns | quit"
 
 	return Model{
 		newClient:  newClient,
 		opts:       opts,
-		active:     viewPods,
+		active:     viewResources,
 		contexts:   newContextsView(),
 		namespaces: newNamespacesView(),
-		pods:       newPodsView(),
+		resources:  newResourcesView(),
 		logs:       newLogsView(),
 		describe:   newDescribeView(),
 		command:    ti,
@@ -159,7 +159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backMsg:
 		if m.client != nil {
-			m.setActive(viewPods)
+			m.setActive(viewResources)
 		}
 		return m, nil
 
@@ -173,10 +173,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.namespaces, cmd = m.namespaces.Update(msg)
 		return m, cmd
 
-	// The pod watch keeps running whatever view is active.
-	case podWatchStartedMsg, podEventsMsg, podWatchClosedMsg, ageTickMsg:
+	// The resource watch keeps running whatever view is active.
+	case watchStartedMsg, resourceEventsMsg, watchClosedMsg, ageTickMsg:
 		var cmd tea.Cmd
-		m.pods, cmd = m.pods.Update(msg)
+		m.resources, cmd = m.resources.Update(msg)
 		return m, cmd
 
 	case logStreamStartedMsg, logLinesMsg, logStreamEndedMsg:
@@ -264,13 +264,11 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 			return m.switchNamespace(arg)
 		}
 		return m.showNamespaces()
-	case "pods", "pod", "po":
-		if m.client != nil {
-			m.setActive(viewPods)
-		}
-		return m, nil
 	case "q", "quit":
 		return m, tea.Quit
+	}
+	if rt, ok := k8s.LookupResourceType(fields[0]); ok {
+		return m.showResources(rt)
 	}
 	return m, reportErr(fmt.Errorf("unknown command %q", fields[0]))
 }
@@ -305,8 +303,8 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.contexts, cmd = m.contexts.Update(contextsLoadedMsg{contexts: msg.contexts})
 	// start stops the previous context's informer before creating a new one.
-	watchCmd := m.pods.start(m.client, m.namespace)
-	m.setActive(viewPods)
+	watchCmd := m.resources.start(m.client, m.resources.rt, m.namespace)
+	m.setActive(viewResources)
 	return m, tea.Batch(cmd, watchCmd)
 }
 
@@ -321,8 +319,21 @@ func (m Model) switchNamespace(ns string) (tea.Model, tea.Cmd) {
 	if m.client == nil {
 		return m, nil
 	}
-	cmd := m.pods.start(m.client, ns)
-	m.setActive(viewPods)
+	cmd := m.resources.start(m.client, m.resources.rt, ns)
+	m.setActive(viewResources)
+	return m, cmd
+}
+
+// showResources switches the table to another resource type.
+func (m Model) showResources(rt *k8s.ResourceType) (tea.Model, tea.Cmd) {
+	if m.client == nil {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	if rt != m.resources.rt {
+		cmd = m.resources.start(m.client, rt, m.namespace)
+	}
+	m.setActive(viewResources)
 	return m, cmd
 }
 
@@ -361,8 +372,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.contexts, cmd = m.contexts.Update(msg)
 	case viewNamespaces:
 		m.namespaces, cmd = m.namespaces.Update(msg)
-	case viewPods:
-		m.pods, cmd = m.pods.Update(msg)
+	case viewResources:
+		m.resources, cmd = m.resources.Update(msg)
 	case viewLogs:
 		m.logs, cmd = m.logs.Update(msg)
 	case viewDescribe:
@@ -377,8 +388,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.contexts.capturingInput()
 	case viewNamespaces:
 		return m.namespaces.capturingInput()
-	case viewPods:
-		return m.pods.capturingInput()
+	case viewResources:
+		return m.resources.capturingInput()
 	case viewLogs:
 		return m.logs.capturingInput()
 	case viewDescribe:
@@ -393,8 +404,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.contexts.keys()}
 	case viewNamespaces:
 		return helpKeys{view: m.namespaces.keys()}
-	case viewPods:
-		return helpKeys{view: m.pods.keys()}
+	case viewResources:
+		return helpKeys{view: m.resources.keys()}
 	case viewLogs:
 		return helpKeys{view: m.logs.keys()}
 	case viewDescribe:
@@ -414,7 +425,7 @@ func (m *Model) layout() {
 	m.bodyHeight = h
 	m.contexts.SetSize(m.width, h)
 	m.namespaces.SetSize(m.width, h)
-	m.pods.SetSize(m.width, h)
+	m.resources.SetSize(m.width, h)
 	m.logs.SetSize(m.width, h)
 	m.describe.SetSize(m.width, h)
 }
@@ -430,8 +441,8 @@ func (m Model) View() string {
 		body = m.contexts.View()
 	case viewNamespaces:
 		body = m.namespaces.View()
-	case viewPods:
-		body = m.pods.View()
+	case viewResources:
+		body = m.resources.View()
 	case viewLogs:
 		body = m.logs.View()
 	case viewDescribe:

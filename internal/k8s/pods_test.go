@@ -3,7 +3,6 @@ package k8s
 import (
 	"context"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,69 +132,5 @@ func TestListPodsFiltersNamespace(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Fatalf("ListPods(all) returned %d pods", len(all))
-	}
-}
-
-// nextEvent waits for the next event of the given type, skipping others.
-func nextEvent(t *testing.T, ch <-chan PodEvent, typ PodEventType) PodEvent {
-	t.Helper()
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case ev, ok := <-ch:
-			if !ok {
-				t.Fatalf("events closed while waiting for type %d", typ)
-			}
-			if ev.Type == typ {
-				return ev
-			}
-		case <-timeout:
-			t.Fatalf("timed out waiting for event type %d", typ)
-		}
-	}
-}
-
-func TestWatchPods(t *testing.T) {
-	c, cs := newFakeClient(t, pod("a", "existing"))
-
-	w, err := c.WatchPods("a")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if ev := nextEvent(t, w.Events, PodUpserted); ev.Pod.Name != "existing" {
-		t.Fatalf("first event for %q", ev.Pod.Name)
-	}
-	nextEvent(t, w.Events, PodsSynced)
-
-	// Simulate cluster activity. These writes go to the *fake* clientset;
-	// kboba itself never writes.
-	ctx := context.Background()
-	if _, err := cs.CoreV1().Pods("a").Create(ctx, pod("a", "new"), metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if ev := nextEvent(t, w.Events, PodUpserted); ev.Pod.Name != "new" {
-		t.Fatalf("expected add of %q, got %q", "new", ev.Pod.Name)
-	}
-	if err := cs.CoreV1().Pods("a").Delete(ctx, "existing", metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if ev := nextEvent(t, w.Events, PodDeleted); ev.Pod.Name != "existing" {
-		t.Fatalf("expected delete of %q, got %q", "existing", ev.Pod.Name)
-	}
-
-	// Stop must eventually close the channel, and be idempotent.
-	w.Stop()
-	w.Stop()
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case _, ok := <-w.Events:
-			if !ok {
-				return
-			}
-		case <-timeout:
-			t.Fatal("Events not closed after Stop")
-		}
 	}
 }

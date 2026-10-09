@@ -13,8 +13,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Contexts**: list kubeconfig contexts and switch between them (in memory
   only, your kubeconfig is never written).
 - **Namespaces**: pick a namespace, or "all namespaces".
-- **Pods**: live table (NAME, READY, STATUS, RESTARTS, AGE, plus NAMESPACE
-  in all-namespaces mode) driven by an informer, no polling.
+- **Pods, Deployments, Services, Events, Nodes**: live tables driven by
+  informers, no polling (NAMESPACE column in all-namespaces mode).
 - **Logs**: follow a container's logs, toggle auto-scroll, cycle containers.
 - **Describe**: pod status, containers, conditions and related events.
 - Filter by name with `/`, k9s-style `:` commands, `?` for help.
@@ -53,15 +53,16 @@ Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 |             | `?`            | toggle full help                     |
 |             | `esc`          | back / clear filter                  |
 |             | `q`, `ctrl+c`  | quit                                 |
+| tables      | `/`            | filter by name                       |
 | pods        | `enter`        | logs of the selected pod             |
 |             | `d`            | describe the selected pod            |
-|             | `/`            | filter by name                       |
 | logs        | `f`            | toggle follow (auto-scroll)          |
 |             | `c`            | next container                       |
 |             | `↑↓ pgup pgdn` | scroll (scrolling up pauses follow)  |
 | describe    | `r`            | refresh                              |
 
-Commands: `:pods`, `:ctx [name]`, `:ns [name|all]`, `:q`.
+Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:svc`, `:events` (`:ev`),
+`:nodes` (`:no`), `:ctx [name]`, `:ns [name|all]`, `:q`.
 
 ## Try it with kind (read-only ServiceAccount)
 
@@ -80,14 +81,15 @@ cluster is targeted. It deploys to the `kboba-demo` namespace:
 - `crashloop`: exits with an error, ends up in `CrashLoopBackOff`
 - `multi`: two containers (`c` switches between them in the logs view)
 - `bad-image`: `ImagePullBackOff`
+- `web`: a Deployment with two replicas and a Service in front of it
 
 `make kind-kubeconfig` writes `.kind/readonly.kubeconfig` with three
 contexts:
 
 | Context             | Permissions                                                        |
 |---------------------|--------------------------------------------------------------------|
-| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events |
-| `kboba-limited`     | Same verbs, only inside `kboba-demo` (try `:ns` and `:ns all`)     |
+| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events, services, nodes, deployments, replicasets |
+| `kboba-limited`     | Same verbs, only inside `kboba-demo` (try `:ns`, `:ns all`, `:nodes`) |
 | `kboba-unreachable` | Points at a dead endpoint, to see connection errors                |
 
 ## Layout

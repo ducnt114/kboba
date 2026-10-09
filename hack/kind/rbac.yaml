@@ -11,7 +11,10 @@ metadata:
   name: kboba-readonly
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "namespaces", "events"]
+    resources: ["pods", "pods/log", "namespaces", "events", "services", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -27,8 +30,9 @@ subjects:
     name: kboba-readonly
     namespace: kboba-demo
 ---
-# kboba-limited: read-only, and only inside kboba-demo. Listing namespaces
-# or pods in "all namespaces" is forbidden, to exercise kboba's error paths.
+# kboba-limited: read-only, and only inside kboba-demo. Listing namespaces,
+# nodes, or anything in "all namespaces" is forbidden, to exercise kboba's
+# error paths.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -42,7 +46,10 @@ metadata:
   namespace: kboba-demo
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "events"]
+    resources: ["pods", "pods/log", "events", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -20,6 +20,7 @@ type fakeClient struct {
 	namespaces []string
 	nsErr      error
 	pods       []k8s.PodInfo
+	others     map[string][]k8s.Resource // non-pod resources by type name
 	watches    []*fakeWatch
 	streams    []*fakeStream
 }
@@ -30,12 +31,13 @@ type fakeStream struct {
 	ctx       context.Context
 }
 
-// fakeWatch is a pod watch whose events are queued up front (initial pods
-// followed by PodsSynced), like an informer's initial list.
+// fakeWatch is a watch whose events are queued up front (initial objects
+// followed by Synced), like an informer's initial list.
 type fakeWatch struct {
+	rt        *k8s.ResourceType
 	namespace string
 	stopped   bool
-	*k8s.PodWatch
+	*k8s.ResourceWatch
 }
 
 func (f *fakeClient) ListContexts() ([]k8s.ContextInfo, error) {
@@ -65,22 +67,34 @@ func (f *fakeClient) GetPod(context.Context, string, string) (*corev1.Pod, error
 	return &corev1.Pod{}, nil
 }
 
-func (f *fakeClient) WatchPods(ns string) (*k8s.PodWatch, error) {
-	pods, _ := f.ListPods(context.Background(), ns)
-	ch := make(chan k8s.PodEvent, len(pods)+1)
-	for _, p := range pods {
-		ch <- k8s.PodEvent{Type: k8s.PodUpserted, Pod: p}
+func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns string) (*k8s.ResourceWatch, error) {
+	var items []k8s.Resource
+	if rt == k8s.Pods {
+		pods, _ := f.ListPods(context.Background(), ns)
+		for _, p := range pods {
+			items = append(items, k8s.Resource{Namespace: p.Namespace, Name: p.Name, Cells: make([]string, len(rt.Columns)), Pod: &p})
+		}
 	}
-	ch <- k8s.PodEvent{Type: k8s.PodsSynced}
+	for _, r := range f.others[rt.Name] {
+		if ns == "" || r.Namespace == ns {
+			items = append(items, r)
+		}
+	}
 
-	w := &fakeWatch{namespace: ns}
+	ch := make(chan k8s.ResourceEvent, len(items)+1)
+	for _, r := range items {
+		ch <- k8s.ResourceEvent{Type: k8s.Upserted, Resource: r}
+	}
+	ch <- k8s.ResourceEvent{Type: k8s.Synced}
+
+	w := &fakeWatch{rt: rt, namespace: ns}
 	var once sync.Once
-	w.PodWatch = &k8s.PodWatch{
+	w.ResourceWatch = &k8s.ResourceWatch{
 		Events: ch,
 		Stop:   func() { once.Do(func() { w.stopped = true; close(ch) }) },
 	}
 	f.watches = append(f.watches, w)
-	return w.PodWatch, nil
+	return w.ResourceWatch, nil
 }
 
 // StreamLogs emits two lines, then stays open (like a follow) until ctx
@@ -119,6 +133,10 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 				{Namespace: "team-a", Name: "api", Containers: []string{"app", "sidecar"}, DefaultContainer: "app"},
 				{Namespace: "team-a", Name: "worker"},
 				{Namespace: "default", Name: "web"},
+			},
+			others: map[string][]k8s.Resource{
+				"deployments": {{Namespace: "team-a", Name: "api", Cells: []string{"api", "1/1", "1", "1"}}},
+				"nodes":       {{Name: "node-1", Cells: []string{"node-1", "Ready", "<none>", "v1.33.0"}}},
 			},
 		}, nil
 	}
@@ -269,16 +287,16 @@ func TestPodsWatchLifecycle(t *testing.T) {
 	m := startModel(t, Options{})
 	fc := m.client.(*fakeClient)
 
-	if m.active != viewPods {
+	if m.active != viewResources {
 		t.Fatalf("active view = %v, want pods", m.active)
 	}
 	if len(fc.watches) != 1 || fc.watches[0].namespace != "team-a" {
 		t.Fatalf("watches = %+v", fc.watches)
 	}
-	if got := len(m.pods.rowKeys); got != 2 {
+	if got := len(m.resources.rowKeys); got != 2 {
 		t.Fatalf("pods table has %d rows, want 2", got)
 	}
-	oldGen := m.pods.gen
+	oldGen := m.resources.gen
 
 	// Switching namespace must stop the old informer before starting a new one.
 	m = typeCommand(t, m, "ns all")
@@ -288,18 +306,18 @@ func TestPodsWatchLifecycle(t *testing.T) {
 	if len(fc.watches) != 2 || fc.watches[1].namespace != "" {
 		t.Fatalf("expected a new all-namespaces watch, got %+v", fc.watches)
 	}
-	if got := len(m.pods.rowKeys); got != 3 {
+	if got := len(m.resources.rowKeys); got != 3 {
 		t.Fatalf("pods table has %d rows, want 3", got)
 	}
-	if cols := m.pods.table.Columns(); cols[0].Title != "NAMESPACE" {
+	if cols := m.resources.table.Columns(); cols[0].Title != "NAMESPACE" {
 		t.Fatalf("first column = %q, want NAMESPACE", cols[0].Title)
 	}
 
 	// A late event from the old watch must be ignored.
-	m = send(t, m, podEventsMsg{gen: oldGen, events: []k8s.PodEvent{
-		{Type: k8s.PodUpserted, Pod: k8s.PodInfo{Namespace: "team-a", Name: "ghost"}},
+	m = send(t, m, resourceEventsMsg{gen: oldGen, events: []k8s.ResourceEvent{
+		{Type: k8s.Upserted, Resource: k8s.Resource{Namespace: "team-a", Name: "ghost"}},
 	}})
-	if got := len(m.pods.rowKeys); got != 3 {
+	if got := len(m.resources.rowKeys); got != 3 {
 		t.Fatalf("stale event changed the table: %d rows", got)
 	}
 }
@@ -312,15 +330,15 @@ func TestPodsWatchStoppedOnContextSwitch(t *testing.T) {
 	if !old.watches[0].stopped {
 		t.Fatal("watch of the previous context was not stopped")
 	}
-	if m.pods.namespace != "default" {
-		t.Fatalf("pods namespace = %q", m.pods.namespace)
+	if m.resources.namespace != "default" {
+		t.Fatalf("pods namespace = %q", m.resources.namespace)
 	}
 }
 
 func TestPodsFilter(t *testing.T) {
 	m := startModel(t, Options{})
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	if !m.pods.capturingInput() {
+	if !m.resources.capturingInput() {
 		t.Fatal("filter should have focus")
 	}
 	// "q" must be typed into the filter, not quit the app.
@@ -328,12 +346,12 @@ func TestPodsFilter(t *testing.T) {
 		m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
-	if len(m.pods.rowKeys) != 1 || m.pods.rowKeys[0] != "team-a/worker" {
-		t.Fatalf("filtered rows = %v", m.pods.rowKeys)
+	if len(m.resources.rowKeys) != 1 || m.resources.rowKeys[0] != "team-a/worker" {
+		t.Fatalf("filtered rows = %v", m.resources.rowKeys)
 	}
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	if len(m.pods.rowKeys) != 2 {
-		t.Fatalf("esc should clear the filter, rows = %v", m.pods.rowKeys)
+	if len(m.resources.rowKeys) != 2 {
+		t.Fatalf("esc should clear the filter, rows = %v", m.resources.rowKeys)
 	}
 }
 
@@ -385,7 +403,7 @@ func TestLogsLifecycle(t *testing.T) {
 
 	// Leaving the view cancels the stream.
 	m = send(t, m, press("esc"))
-	if m.active != viewPods {
+	if m.active != viewResources {
 		t.Fatalf("active view = %v, want pods", m.active)
 	}
 	if fc.streams[1].ctx.Err() == nil {
@@ -399,7 +417,7 @@ func TestLogsCancelledOnNamespaceSwitch(t *testing.T) {
 
 	m = send(t, m, press("enter"))
 	m = typeCommand(t, m, "ns default")
-	if m.active != viewPods {
+	if m.active != viewResources {
 		t.Fatalf("active view = %v", m.active)
 	}
 	if fc.streams[0].ctx.Err() == nil {
@@ -425,7 +443,7 @@ func TestDescribe(t *testing.T) {
 	}
 
 	m = send(t, m, press("esc"))
-	if m.active != viewPods {
+	if m.active != viewResources {
 		t.Fatalf("active view = %v, want pods", m.active)
 	}
 }
@@ -450,7 +468,61 @@ func TestQuitKeyIgnoredWhileTyping(t *testing.T) {
 			t.Fatal("q quit the app while the filter had focus")
 		}
 	}
-	if m.pods.filter.Value() != "q" {
-		t.Fatalf("filter = %q, want q", m.pods.filter.Value())
+	if m.resources.filter.Value() != "q" {
+		t.Fatalf("filter = %q, want q", m.resources.filter.Value())
+	}
+}
+
+func TestSwitchResourceType(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	m = typeCommand(t, m, "deploy")
+	if m.resources.rt != k8s.Deployments {
+		t.Fatalf("resource type = %s", m.resources.rt.Name)
+	}
+	if !fc.watches[0].stopped {
+		t.Fatal("pods watch not stopped")
+	}
+	last := fc.watches[len(fc.watches)-1]
+	if last.rt != k8s.Deployments || last.namespace != "team-a" {
+		t.Fatalf("new watch = %s in %q", last.rt.Name, last.namespace)
+	}
+	if len(m.resources.rowKeys) != 1 {
+		t.Fatalf("rows = %v", m.resources.rowKeys)
+	}
+	// enter/d are pod-only actions.
+	m = send(t, m, press("enter"))
+	if m.active != viewResources {
+		t.Fatalf("enter on a deployment opened view %v", m.active)
+	}
+
+	// Namespace switches keep the resource type.
+	m = typeCommand(t, m, "ns all")
+	last = fc.watches[len(fc.watches)-1]
+	if last.rt != k8s.Deployments || last.namespace != "" {
+		t.Fatalf("after :ns all watch = %s in %q", last.rt.Name, last.namespace)
+	}
+}
+
+func TestClusterScopedHasNoNamespaceColumn(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "ns all")
+	m = typeCommand(t, m, "nodes")
+
+	cols := m.resources.table.Columns()
+	if cols[0].Title != "NAME" || cols[len(cols)-1].Title != "AGE" {
+		t.Fatalf("columns = %+v", cols)
+	}
+	if len(m.resources.rowKeys) != 1 {
+		t.Fatalf("rows = %v", m.resources.rowKeys)
+	}
+}
+
+func TestUnknownResourceCommand(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "secrets")
+	if !m.statusIsErr || m.resources.rt != k8s.Pods {
+		t.Fatalf("status=%q rt=%s", m.status, m.resources.rt.Name)
 	}
 }
