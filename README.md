@@ -5,7 +5,8 @@ A tiny, **read-only**, k9s-like terminal UI for Kubernetes, built with
 [client-go](https://github.com/kubernetes/client-go).
 
 kboba is a learning project: the code favours being small and easy to read
-over features.
+over features. See [docs/LEARNING.md](docs/LEARNING.md) (Vietnamese) for a
+phase-by-phase walkthrough of how and why it is built this way.
 
 ## Features
 
