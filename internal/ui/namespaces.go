@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -14,10 +13,6 @@ import (
 // allNamespaces is the namespace value meaning "every namespace". It matches
 // metav1.NamespaceAll.
 const allNamespaces = ""
-
-// requestTimeout bounds one-shot API calls so a dead cluster can't leave a
-// command hanging forever.
-const requestTimeout = 15 * time.Second
 
 type namespacesLoadedMsg struct {
 	names []string

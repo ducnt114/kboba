@@ -39,6 +39,10 @@ type Client interface {
 
 	// StreamLogs follows a container's logs until ctx is cancelled.
 	StreamLogs(ctx context.Context, namespace, pod, container string) (<-chan string, <-chan error, error)
+
+	// DescribePod returns a human-readable description of a pod and its
+	// events, similar to `kubectl describe pod`.
+	DescribePod(ctx context.Context, namespace, name string) (string, error)
 }
 
 // client is the real Client implementation. It is bound to a single

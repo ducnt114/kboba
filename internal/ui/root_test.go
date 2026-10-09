@@ -97,6 +97,15 @@ func (f *fakeClient) StreamLogs(ctx context.Context, _, _, container string) (<-
 	return lines, make(chan error), nil
 }
 
+func (f *fakeClient) DescribePod(_ context.Context, ns, name string) (string, error) {
+	for _, p := range f.pods {
+		if p.Namespace == ns && p.Name == name {
+			return "Name: " + name, nil
+		}
+	}
+	return "", errors.New("pods \"" + name + "\" not found")
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -395,5 +404,53 @@ func TestLogsCancelledOnNamespaceSwitch(t *testing.T) {
 	}
 	if fc.streams[0].ctx.Err() == nil {
 		t.Fatal("stream not cancelled")
+	}
+}
+
+func TestDescribe(t *testing.T) {
+	m := startModel(t, Options{})
+
+	m = send(t, m, press("d"))
+	if m.active != viewDescribe {
+		t.Fatalf("active view = %v, want describe", m.active)
+	}
+	if m.describe.text != "Name: api" {
+		t.Fatalf("describe text = %q", m.describe.text)
+	}
+
+	// A late result for another pod must not replace the current one.
+	m = send(t, m, describeLoadedMsg{key: "team-a/worker", text: "Name: worker"})
+	if m.describe.text != "Name: api" {
+		t.Fatalf("stale describe applied: %q", m.describe.text)
+	}
+
+	m = send(t, m, press("esc"))
+	if m.active != viewPods {
+		t.Fatalf("active view = %v, want pods", m.active)
+	}
+}
+
+func TestDescribeDeletedPodShowsError(t *testing.T) {
+	m := startModel(t, Options{})
+	m.client.(*fakeClient).pods = nil // pod deleted after the table was drawn
+
+	m = send(t, m, press("d"))
+	if !m.statusIsErr {
+		t.Fatal("expected not-found error in status bar")
+	}
+}
+
+func TestQuitKeyIgnoredWhileTyping(t *testing.T) {
+	m := startModel(t, Options{})
+	m = send(t, m, press("/"))
+	next, cmd := m.Update(press("q"))
+	m = next.(Model)
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("q quit the app while the filter had focus")
+		}
+	}
+	if m.pods.filter.Value() != "q" {
+		t.Fatalf("filter = %q, want q", m.pods.filter.Value())
 	}
 }

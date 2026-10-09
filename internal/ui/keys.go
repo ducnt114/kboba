@@ -47,7 +47,7 @@ func (h helpKeys) FullHelp() [][]key.Binding {
 	g := globalKeyMap
 	return [][]key.Binding{
 		h.view,
-		{g.Command, g.Back, g.Help, g.Quit},
+		{g.Command, g.Help, g.Quit},
 		{
 			key.NewBinding(key.WithKeys(":ctx"), key.WithHelp(":ctx [name]", "contexts")),
 			key.NewBinding(key.WithKeys(":ns"), key.WithHelp(":ns [name]", "namespaces")),

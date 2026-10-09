@@ -1,8 +1,14 @@
 package ui
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// requestTimeout bounds one-shot API calls so a dead cluster can't leave a
+// command hanging forever.
+const requestTimeout = 15 * time.Second
 
 // Messages shared between the root model and the views. View-specific
 // messages live next to the view that consumes them.

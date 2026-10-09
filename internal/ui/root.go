@@ -35,6 +35,7 @@ const (
 	viewContexts
 	viewNamespaces
 	viewLogs
+	viewDescribe
 )
 
 // clientReadyMsg is sent once a client for a (new) context has been created.
@@ -61,6 +62,7 @@ type Model struct {
 	namespaces namespacesView
 	pods       podsView
 	logs       logsView
+	describe   describeView
 
 	commandMode bool
 	command     textinput.Model
@@ -87,6 +89,7 @@ func New(newClient ClientFactory, opts Options) Model {
 		namespaces: newNamespacesView(),
 		pods:       newPodsView(),
 		logs:       newLogsView(),
+		describe:   newDescribeView(),
 		command:    ti,
 		help:       help.New(),
 		status:     "connecting…",
@@ -149,6 +152,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setActive(viewLogs)
 		return m, cmd
 
+	case openDescribeMsg:
+		cmd := m.describe.open(m.client, msg.pod)
+		m.setActive(viewDescribe)
+		return m, cmd
+
 	case backMsg:
 		if m.client != nil {
 			m.setActive(viewPods)
@@ -174,6 +182,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logStreamStartedMsg, logLinesMsg, logStreamEndedMsg:
 		var cmd tea.Cmd
 		m.logs, cmd = m.logs.Update(msg)
+		return m, cmd
+
+	case describeLoadedMsg:
+		var cmd tea.Cmd
+		m.describe, cmd = m.describe.Update(msg)
 		return m, cmd
 	}
 
@@ -352,6 +365,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pods, cmd = m.pods.Update(msg)
 	case viewLogs:
 		m.logs, cmd = m.logs.Update(msg)
+	case viewDescribe:
+		m.describe, cmd = m.describe.Update(msg)
 	}
 	return m, cmd
 }
@@ -366,6 +381,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.pods.capturingInput()
 	case viewLogs:
 		return m.logs.capturingInput()
+	case viewDescribe:
+		return m.describe.capturingInput()
 	}
 	return false
 }
@@ -380,6 +397,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.pods.keys()}
 	case viewLogs:
 		return helpKeys{view: m.logs.keys()}
+	case viewDescribe:
+		return helpKeys{view: m.describe.keys()}
 	}
 	return helpKeys{}
 }
@@ -397,6 +416,7 @@ func (m *Model) layout() {
 	m.namespaces.SetSize(m.width, h)
 	m.pods.SetSize(m.width, h)
 	m.logs.SetSize(m.width, h)
+	m.describe.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -414,6 +434,8 @@ func (m Model) View() string {
 		body = m.pods.View()
 	case viewLogs:
 		body = m.logs.View()
+	case viewDescribe:
+		body = m.describe.View()
 	}
 
 	// Pin the body height so the status and help bars stay at the bottom.

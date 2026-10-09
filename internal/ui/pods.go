@@ -337,5 +337,9 @@ func (v podsView) capturingInput() bool { return v.filter.Focused() }
 
 func (v podsView) keys() []key.Binding {
 	k := podsKeyMap
-	return []key.Binding{k.Up, k.Down, k.Logs, k.Describe, k.Filter}
+	b := []key.Binding{k.Up, k.Down, k.Logs, k.Describe, k.Filter}
+	if v.filter.Value() != "" {
+		b = append(b, key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear filter")))
+	}
+	return b
 }

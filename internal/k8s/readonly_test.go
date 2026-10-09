@@ -19,6 +19,7 @@ var readOnlyMethods = []string{
 	"WatchPods",
 	"GetPod",
 	"StreamLogs",
+	"DescribePod",
 }
 
 func TestClientInterfaceIsReadOnly(t *testing.T) {
@@ -91,6 +92,9 @@ func TestClientOnlyReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range lines {
+	}
+	if _, err := c.DescribePod(ctx, "default", "web"); err != nil {
+		t.Fatal(err)
 	}
 
 	actions := cs.Actions()

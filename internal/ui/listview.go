@@ -38,5 +38,5 @@ func updateList(l list.Model, msg tea.Msg) (_ list.Model, cmd tea.Cmd, selected 
 
 func listHelp() []key.Binding {
 	k := listKeyMap
-	return []key.Binding{k.Up, k.Down, k.Select, k.Filter}
+	return []key.Binding{k.Up, k.Down, k.Select, k.Filter, globalKeyMap.Back}
 }
