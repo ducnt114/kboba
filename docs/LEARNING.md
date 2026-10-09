@@ -27,6 +27,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 16. [Phase 2.5: Sắp xếp cột](#16-phase-25-sắp-xếp-cột)
 17. [Phase 2.6: Tô màu và table tự viết](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết)
 18. [Phase 2.7: Nhớ namespace của mỗi context](#18-phase-27-nhớ-namespace-của-mỗi-context)
+19. [Phase 2.8: Cột CPU/MEM](#19-phase-28-cột-cpumem-từ-metrics-server)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -534,7 +535,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ✅ [mục 16](#16-phase-25-sắp-xếp-cột) |
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ✅ [mục 17](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết) |
 | 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ✅ [mục 18](#18-phase-27-nhớ-namespace-của-mỗi-context) |
-| 2.8 | Cột CPU/MEM | So sánh poll và informer | ⏳ |
+| 2.8 | Cột CPU/MEM | So sánh poll và informer | ✅ [mục 19](#19-phase-28-cột-cpumem-từ-metrics-server) |
 | 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ⏳ |
 
 **Không làm:**
@@ -1109,4 +1110,81 @@ return func() tea.Msg {                          // ghi đĩa trong goroutine c�
 | File state hỏng làm app không mở được | `Open` trả về store dùng được kèm lỗi |
 | Cảnh báo khởi động bị thông báo info đè ngay lập tức | `statusSticky` cho tới phím bấm đầu tiên |
 | Ghi đĩa mỗi lần khởi động dù không có gì đổi | So sánh trước, không đổi thì không lưu |
+
+## 19. Phase 2.8: Cột CPU/MEM từ metrics-server
+
+### Mục tiêu
+Bảng pods và nodes có thêm cột CPU (`250m`) và MEM (`128Mi`) giống `kubectl top`, tự cập nhật. Nếu cluster không có metrics-server thì hai cột hiện `-` và tiêu đề có `(no metrics)`; app không bị ảnh hưởng gì khác.
+
+### Học được gì
+- **Poll và watch:** metrics API (`metrics.k8s.io`) chỉ hỗ trợ `get`/`list`, không có `watch`. Đây là chỗ duy nhất kboba phải poll. Hãy so sánh với informer ở phase (c): poll thì có độ trễ tối đa bằng chu kỳ poll và luôn tốn request kể cả khi không có gì thay đổi; watch thì nhận thay đổi gần như tức thì và gần như không tốn gì khi cluster yên tĩnh.
+- **Chọn chu kỳ poll có lý do:** 15 giây, khớp với chu kỳ thu thập mặc định của metrics-server. Poll nhanh hơn chỉ nhận lại đúng số liệu cũ.
+- **Vòng poll trong Elm:** `fetch → loadedMsg → tea.Tick → tickMsg → fetch …`. Không có goroutine hay `time.Ticker` nào phải tự quản lý; generation counter đã có sẵn là đủ để dừng vòng lặp cũ.
+- **Clientset thứ hai:** `k8s.io/metrics` có clientset riêng, nhưng dùng chung `rest.Config`, nên transport chỉ cho GET vẫn áp dụng.
+- **`resource.Quantity`:** `Cpu().MilliValue()`, `Memory().Value()` chuyển các giá trị như `"250m"`, `"128Mi"` thành số.
+- **Báo lỗi một lần:** một lỗi lặp lại mỗi 15 giây sẽ "spam" status bar và đè các thông báo khác.
+
+### Thể hiện trong code
+
+**k8s** (`internal/k8s/metrics.go` → `ListMetrics(ctx, rt, namespace, labelSelector)`):
+- Pods: `MetricsV1beta1().PodMetricses(ns).List`, cộng usage của các container trong pod.
+- Nodes: `NodeMetricses().List`.
+- Kết quả là `map[key]Usage`, với key giống hệt `Resource.Key()` (`ns/name`, hoặc `/name` với node), nên UI ghép số liệu vào dòng chỉ bằng một lần tra map.
+- Hỗ trợ cả label selector, nên khi drill-down vào pods của một deployment thì cũng chỉ lấy metrics của các pod đó.
+- Type không có metrics trả về `ErrNoMetrics`; lỗi API được bọc kèm gợi ý `"is metrics-server installed?"`.
+- `ResourceType.Metrics` (exported) = `true` cho Pods và Nodes; UI dựa vào cờ này để thêm cột.
+- `NewClient` tạo `metricsclient.NewForConfig(cfg)` từ **cùng** `cfg` đã gắn `readOnlyTransport`.
+
+**Vòng poll** (`internal/ui/resources.go`):
+
+```go
+// start(): với type có metrics, chạy song song watch và lần poll đầu
+return tea.Batch(watch, fetchMetrics(c, q, gen))
+
+case metricsLoadedMsg:
+    if msg.gen != v.gen { return v, nil }               // query cũ → vòng lặp dừng ở đây
+    next := tea.Tick(metricsInterval, func(time.Time) tea.Msg { return metricsTickMsg{gen: msg.gen} })
+    ... lưu số liệu hoặc ghi nhận lỗi ...
+    return v, next
+
+case metricsTickMsg:
+    if msg.gen != v.gen { return v, nil }
+    return v, fetchMetrics(v.client, v.q, v.gen)
+```
+
+- Mỗi query chỉ có **một** chuỗi tick. Khi `start()` tăng `gen`, tick và kết quả của chuỗi cũ bị bỏ qua, và vì không ai lên lịch tick tiếp, chuỗi cũ tự dừng.
+- `resourcesView.client` được giữ lại để lần tick sau gọi tiếp.
+- Lỗi: xóa số liệu cũ (để không hiển thị số liệu sai mà trông như thật); chỉ `reportErr` khi chuyển từ OK sang lỗi (`metricsFailed`); vẫn poll tiếp, vì metrics-server có thể được cài sau đó.
+- Tiêu đề có `(no metrics)` khi `metricsFailed`. Status bar có thể bị thông báo khác đè (smoke test đã cho thấy "watching 6 pods" đè lỗi metrics ngay lập tức), còn tiêu đề thì luôn hiện.
+
+**Cột và format:**
+- `columns()` thêm `CPU` và `MEM` trước `AGE` khi `rt.Metrics`.
+- `usageCells(key)` trả về `"-"` khi chưa có số liệu.
+- `formatCPU` luôn dùng millicore, `formatMemory` luôn dùng Mi. Dùng **cùng một đơn vị** để sắp xếp đúng: `naturalLess` so sánh phần số của `"1500m"` và `"250m"`, còn nếu trộn đơn vị (`1Gi` với `900Mi`) thì sẽ sai.
+
+**kind:**
+- `make kind-up` cài metrics-server (`METRICS_SERVER_VERSION`) và patch thêm `--kubelet-insecure-tls`, vì kubelet trong kind dùng chứng chỉ tự ký. Chỉ dùng cho môi trường local.
+- `rbac.yaml` cấp `metrics.k8s.io` `pods`, `nodes` với verb `get`, `list`; role `kboba-limited` chỉ có `pods`, nên với context đó `:nodes` sẽ hiện `(no metrics)`.
+
+### Test liên quan
+- `internal/k8s/metrics_test.go`:
+  - `TestListMetricsPods`: cộng container, lọc namespace, chỉ có action `list` trên `metrics.k8s.io`;
+  - `TestListMetricsNodes`;
+  - `TestListMetricsUnsupportedType`.
+- `readonly_test.go`: `ListMetrics` có trong allowlist, được gọi cho mọi type, và các action của metrics fake chỉ là get/list/watch.
+- `internal/ui/format_test.go` → `TestFormatUsage`.
+- `internal/ui/root_test.go`:
+  - `TestMetricsColumns`: cột và giá trị, `-` khi thiếu, services không có cột;
+  - `TestMetricsErrorsReportedOnce`: lỗi chỉ báo một lần, số liệu cũ bị xóa, có `(no metrics)`;
+  - `TestStaleMetricsTickStopsPolling`: tick và kết quả của query cũ không kích hoạt poll mới và không được áp dụng.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Fake metrics clientset: `NewSimpleClientset(objs...)` đoán resource là `podmetricses`, trong khi API dùng `pods`, nên list ra rỗng | Trong test, nạp bằng `Tracker().Create(gvr "pods"/"nodes", obj, ns)` |
+| Nhiều chuỗi tick chạy song song sau khi đổi query | Generation guard: tick cũ không lên lịch tick mới |
+| Lỗi bị báo mỗi 15 giây | `metricsFailed`, chỉ báo khi chuyển trạng thái |
+| Lỗi metrics bị thông báo khác đè, người dùng không biết vì sao cột trống | `(no metrics)` trên tiêu đề |
+| Trộn đơn vị (`Gi`/`Mi`) làm sắp xếp sai | Luôn dùng `m` và `Mi` |
+| kind không có metrics-server, kubelet dùng chứng chỉ tự ký | Makefile cài metrics-server + `--kubelet-insecure-tls` (chỉ local) |
 

@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // Client is the complete set of operations the UI may perform against a
@@ -35,6 +36,10 @@ type Client interface {
 	// label selector. The caller must call Stop on the returned watch.
 	WatchResources(rt *ResourceType, namespace, labelSelector string) (*ResourceWatch, error)
 
+	// ListMetrics returns current CPU/memory usage of pods or nodes from
+	// metrics-server. It must be polled: metrics can't be watched.
+	ListMetrics(ctx context.Context, rt *ResourceType, namespace, labelSelector string) (map[string]Usage, error)
+
 	// GetYAML returns one object as YAML (without managedFields).
 	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
 
@@ -55,6 +60,7 @@ type client struct {
 	raw         clientcmdapi.Config
 	contextName string
 	clientset   kubernetes.Interface
+	metrics     metricsclient.Interface
 	// connErr is set when the context cannot be used (e.g. it does not exist).
 	// Cluster calls return it, while ListContexts still works so the user can
 	// pick another context.
@@ -104,7 +110,13 @@ func NewClient(kubeconfigPath, contextName string) (Client, error) {
 		c.connErr = fmt.Errorf("context %q: %w", contextName, err)
 		return c, nil
 	}
-	c.clientset = cs
+	// Same config, so the same read-only transport guard applies.
+	mc, err := metricsclient.NewForConfig(cfg)
+	if err != nil {
+		c.connErr = fmt.Errorf("context %q: %w", contextName, err)
+		return c, nil
+	}
+	c.clientset, c.metrics = cs, mc
 	return c, nil
 }
 

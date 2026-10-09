@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -34,7 +35,20 @@ type (
 	}
 	watchClosedMsg struct{ gen int }
 	ageTickMsg     struct{}
+
+	// Metrics are polled (they can't be watched). The same generation
+	// guard stops the poll loop of a query we have left.
+	metricsLoadedMsg struct {
+		gen   int
+		usage map[string]k8s.Usage
+		err   error
+	}
+	metricsTickMsg struct{ gen int }
 )
+
+// metricsInterval matches metrics-server's default resolution: polling
+// faster would only fetch the same numbers again.
+const metricsInterval = 15 * time.Second
 
 // resourceQuery is what a resources view shows. The navigation stack
 // saves these, so going back restores exactly what was on screen.
@@ -102,6 +116,10 @@ type resourcesView struct {
 	watch *k8s.ResourceWatch
 	gen   int
 
+	client        k8s.Client // kept to re-poll metrics
+	metrics       map[string]k8s.Usage
+	metricsFailed bool // the last poll failed; report only the first failure
+
 	width int
 	now   func() time.Time // injectable for tests
 }
@@ -131,16 +149,33 @@ func (v *resourcesView) start(c k8s.Client, q resourceQuery, selectKey string) t
 		v.sortCol, v.sortDesc = "", false
 	}
 	v.q = q
+	v.client = c
 	v.pendingSelect = selectKey
 	v.items = map[string]k8s.Resource{}
+	v.metrics = nil
+	v.metricsFailed = false
 	v.synced = false
 	v.setColumns()
 	v.refreshRows()
 
 	gen := v.gen
-	return func() tea.Msg {
+	watch := func() tea.Msg {
 		w, err := c.WatchResources(q.rt, q.namespace, q.selector)
 		return watchStartedMsg{watch: w, gen: gen, err: err}
+	}
+	if !q.rt.Metrics {
+		return watch
+	}
+	return tea.Batch(watch, fetchMetrics(c, q, gen))
+}
+
+// fetchMetrics polls metrics-server once.
+func fetchMetrics(c k8s.Client, q resourceQuery, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+		usage, err := c.ListMetrics(ctx, q.rt, q.namespace, q.selector)
+		return metricsLoadedMsg{gen: gen, usage: usage, err: err}
 	}
 }
 
@@ -215,6 +250,32 @@ func (v resourcesView) Update(msg tea.Msg) (resourcesView, tea.Cmd) {
 	case ageTickMsg:
 		v.refreshRows()
 		return v, ageTick()
+
+	case metricsLoadedMsg:
+		if msg.gen != v.gen {
+			return v, nil // the poll loop of a query we left ends here
+		}
+		next := tea.Tick(metricsInterval, func(time.Time) tea.Msg { return metricsTickMsg{gen: msg.gen} })
+		if msg.err != nil {
+			// Keep polling (metrics-server may come up), but say so once.
+			v.metrics = nil
+			v.refreshRows()
+			if v.metricsFailed {
+				return v, next
+			}
+			v.metricsFailed = true
+			return v, tea.Batch(reportErr(msg.err), next)
+		}
+		v.metricsFailed = false
+		v.metrics = msg.usage
+		v.refreshRows()
+		return v, next
+
+	case metricsTickMsg:
+		if msg.gen != v.gen {
+			return v, nil
+		}
+		return v, fetchMetrics(v.client, v.q, v.gen)
 
 	case tea.KeyMsg:
 		return v.handleKey(msg)
@@ -314,6 +375,9 @@ func (v resourcesView) columns() []k8s.Column {
 		cols = append(cols, k8s.Column{Title: "NAMESPACE", Width: 20})
 	}
 	cols = append(cols, v.q.rt.Columns...)
+	if v.q.rt.Metrics {
+		cols = append(cols, k8s.Column{Title: "CPU", Width: 7}, k8s.Column{Title: "MEM", Width: 8})
+	}
 	return append(cols, k8s.Column{Title: "AGE", Width: 7})
 }
 
@@ -395,6 +459,9 @@ func (v *resourcesView) setRows(selectedKey string) {
 			row = append(row, r.Namespace)
 		}
 		row = append(row, r.Cells...)
+		if v.q.rt.Metrics {
+			row = append(row, v.usageCells(k)...)
+		}
 		row = append(row, formatAge(now.Sub(r.Created)))
 		entries = append(entries, rowEntry{key: k, res: r, row: row})
 	}
@@ -418,6 +485,16 @@ func (v *resourcesView) setRows(selectedKey string) {
 	v.rowKeys = keys
 	v.table.SetRows(rows, styles)
 	v.table.SetCursor(cursor)
+}
+
+// usageCells renders the CPU and MEM cells; "-" until metrics arrive (or
+// when metrics-server isn't available).
+func (v resourcesView) usageCells(key string) []string {
+	u, ok := v.metrics[key]
+	if !ok {
+		return []string{"-", "-"}
+	}
+	return []string{formatCPU(u.CPUMilli), formatMemory(u.MemoryBytes)}
 }
 
 // rowEntry is one table row before sorting.
@@ -483,6 +560,10 @@ func (v resourcesView) View() string {
 	title := titleStyle.Render(fmt.Sprintf("%s[%d]", label, len(v.rowKeys)))
 	if v.q.scope != "" {
 		title += statusStyle.Render("  ← " + v.q.scope)
+	}
+	if v.q.rt.Metrics && v.metricsFailed {
+		// The status bar message can be overwritten; this stays visible.
+		title += statusStyle.Render("  (no metrics)")
 	}
 	switch {
 	case v.filter.Focused():

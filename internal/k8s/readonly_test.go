@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+
+	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
 // readOnlyMethods is the exhaustive allowlist of Client methods. Every one of
@@ -18,6 +20,7 @@ var readOnlyMethods = []string{
 	"ListPods",
 	"WatchResources",
 	"GetYAML",
+	"ListMetrics",
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
@@ -102,6 +105,12 @@ func TestClientOnlyReads(t *testing.T) {
 	for _, rt := range ResourceTypes() {
 		// Not-found is fine: we only care about the verb that was used.
 		_, _ = c.GetYAML(ctx, rt, "default", "web")
+		_, _ = c.ListMetrics(ctx, rt, "default", "")
+	}
+	for _, a := range c.metrics.(*metricsfake.Clientset).Actions() {
+		if v := a.GetVerb(); v != "get" && v != "list" && v != "watch" {
+			t.Errorf("non-read metrics action: %s %s", v, a.GetResource().Resource)
+		}
 	}
 
 	actions := cs.Actions()

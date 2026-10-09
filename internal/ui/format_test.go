@@ -54,3 +54,19 @@ func TestReceiveBatch(t *testing.T) {
 		t.Fatal("expected ok=false on closed channel")
 	}
 }
+
+func TestFormatUsage(t *testing.T) {
+	if got := formatCPU(250); got != "250m" {
+		t.Errorf("formatCPU = %q", got)
+	}
+	for bytes, want := range map[int64]string{
+		0:                 "0Mi",
+		128 * 1024 * 1024: "128Mi",
+		1536 * 1024:       "2Mi", // 1.5Mi rounds up
+		2 << 30:           "2048Mi",
+	} {
+		if got := formatMemory(bytes); got != want {
+			t.Errorf("formatMemory(%d) = %q, want %q", bytes, got, want)
+		}
+	}
+}

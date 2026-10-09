@@ -15,6 +15,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Namespaces**: pick a namespace, or "all namespaces".
 - **Pods, Deployments, Services, Events, Nodes**: live tables driven by
   informers, no polling (NAMESPACE column in all-namespaces mode).
+- **CPU/MEM** columns for pods and nodes from metrics-server (polled every
+  15s, since metrics can't be watched; shows `-` without metrics-server).
 - **Colours** by health: failing rows red, pending/not-ready yellow,
   completed grey.
 - **Drill-down**: from a deployment or service to its pods, `esc` to go
@@ -93,7 +95,9 @@ make kind-down    # delete the cluster
 
 `make kind-up` creates a kind cluster called `kboba` with its **own**
 kubeconfig in `.kind/`, so your `~/.kube/config` is not touched and no other
-cluster is targeted. It deploys to the `kboba-demo` namespace:
+cluster is targeted. It installs metrics-server (with
+`--kubelet-insecure-tls`, fine for a local kind cluster only) and deploys to
+the `kboba-demo` namespace:
 
 - `chatty`: logs a line every second
 - `crashloop`: exits with an error, ends up in `CrashLoopBackOff`
@@ -106,7 +110,7 @@ contexts:
 
 | Context             | Permissions                                                        |
 |---------------------|--------------------------------------------------------------------|
-| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events, services, nodes, deployments, replicasets |
+| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events, services, nodes, deployments, replicasets; get/list on metrics |
 | `kboba-limited`     | Same verbs, only inside `kboba-demo` (try `:ns`, `:ns all`, `:nodes`) |
 | `kboba-unreachable` | Points at a dead endpoint, to see connection errors                |
 

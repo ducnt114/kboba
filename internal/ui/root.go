@@ -217,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	// The resource watch keeps running whatever view is active.
-	case watchStartedMsg, resourceEventsMsg, watchClosedMsg, ageTickMsg:
+	case watchStartedMsg, resourceEventsMsg, watchClosedMsg, ageTickMsg, metricsLoadedMsg, metricsTickMsg:
 		var cmd tea.Cmd
 		m.resources, cmd = m.resources.Update(msg)
 		return m, cmd

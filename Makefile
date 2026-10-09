@@ -9,6 +9,7 @@ KIND_DIR         := .kind
 ADMIN_KUBECONFIG := $(KIND_DIR)/admin.kubeconfig
 RO_KUBECONFIG    := $(KIND_DIR)/readonly.kubeconfig
 KUBECTL          := kubectl --kubeconfig $(ADMIN_KUBECONFIG) --context $(KIND_CONTEXT)
+METRICS_SERVER_VERSION := v0.7.2
 
 .PHONY: build test lint run clean kind-up kind-kubeconfig run-kind kind-down help
 
@@ -35,6 +36,11 @@ kind-up: ## Create the local kind cluster with sample pods and read-only RBAC
 		kind create cluster --name $(KIND_CLUSTER) --kubeconfig $(ADMIN_KUBECONFIG)
 	@test -f $(ADMIN_KUBECONFIG) || kind export kubeconfig --name $(KIND_CLUSTER) --kubeconfig $(ADMIN_KUBECONFIG)
 	$(KUBECTL) apply -f hack/kind/demo.yaml -f hack/kind/rbac.yaml
+	@# metrics-server feeds the CPU/MEM columns. kind's kubelets use
+	@# self-signed certificates, hence --kubelet-insecure-tls (local only!).
+	$(KUBECTL) apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/$(METRICS_SERVER_VERSION)/components.yaml
+	$(KUBECTL) -n kube-system patch deployment metrics-server --type=json \
+		-p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
 
 kind-kubeconfig: kind-up ## Write a read-only kubeconfig to .kind/readonly.kubeconfig
 	hack/kind/readonly-kubeconfig.sh $(ADMIN_KUBECONFIG) $(KIND_CONTEXT) > $(RO_KUBECONFIG)

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,9 @@ type fakeClient struct {
 	watches    []*fakeWatch
 	streams    []*fakeStream
 	logLines   []string // extra lines every stream emits
+	usage      map[string]k8s.Usage
+	metricsErr error
+	metricCall int
 }
 
 // fakeStream records a StreamLogs call; ctx tells whether it was cancelled.
@@ -140,6 +144,11 @@ func (f *fakeClient) GetYAML(_ context.Context, rt *k8s.ResourceType, ns, name s
 	return "kind: " + rt.Name + "\nmetadata:\n  name: " + name + "\n  namespace: " + ns + "\n", nil
 }
 
+func (f *fakeClient) ListMetrics(context.Context, *k8s.ResourceType, string, string) (map[string]k8s.Usage, error) {
+	f.metricCall++
+	return f.usage, f.metricsErr
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -153,6 +162,9 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 				{Namespace: "team-a", Name: "api", Containers: []string{"app", "sidecar"}, DefaultContainer: "app"},
 				{Namespace: "team-a", Name: "worker"},
 				{Namespace: "default", Name: "web"},
+			},
+			usage: map[string]k8s.Usage{
+				"team-a/api": {CPUMilli: 250, MemoryBytes: 64 << 20},
 			},
 			podLabels: map[string]labels.Set{
 				"api":    {"app": "api"},
@@ -849,5 +861,67 @@ func TestStartupWarningShown(t *testing.T) {
 	m = typeCommand(t, m, "deploy")
 	if m.status == "parse state: boom" {
 		t.Fatal("warning should give way after the user acted")
+	}
+}
+
+func TestMetricsColumns(t *testing.T) {
+	m := startModel(t, Options{})
+
+	titles := m.resources.columnTitles()
+	if !slices.Contains(titles, "CPU") || !slices.Contains(titles, "MEM") {
+		t.Fatalf("pods columns = %v", titles)
+	}
+	// rows: team-a/api, team-a/worker; cells: NAME READY STATUS RESTARTS CPU MEM AGE
+	rows := m.resources.table.rows
+	if rows[0][4] != "250m" || rows[0][5] != "64Mi" {
+		t.Fatalf("api usage = %v", rows[0])
+	}
+	if rows[1][4] != "-" {
+		t.Fatalf("pod without metrics should show '-': %v", rows[1])
+	}
+
+	m = typeCommand(t, m, "svc")
+	if slices.Contains(m.resources.columnTitles(), "CPU") {
+		t.Fatal("services have no metrics")
+	}
+}
+
+func TestMetricsErrorsReportedOnce(t *testing.T) {
+	m := startModel(t, Options{})
+	gen := m.resources.gen
+	m.client.(*fakeClient).metricsErr = errors.New("metrics unavailable")
+
+	m = send(t, m, metricsTickMsg{gen: gen}) // poll → failure
+	if !m.statusIsErr || !strings.Contains(m.status, "metrics unavailable") {
+		t.Fatalf("status = %q", m.status)
+	}
+	if m.resources.metrics != nil {
+		t.Fatal("stale metrics should be dropped on failure")
+	}
+	if !strings.Contains(m.resources.View(), "(no metrics)") {
+		t.Fatal("the title should say metrics are missing")
+	}
+
+	m = send(t, m, statusMsg{text: "something else"})
+	m = send(t, m, metricsTickMsg{gen: gen}) // fails again: no new message
+	if m.status != "something else" {
+		t.Fatalf("repeated failure overwrote the status: %q", m.status)
+	}
+}
+
+func TestStaleMetricsTickStopsPolling(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	oldGen := m.resources.gen
+
+	m = typeCommand(t, m, "ns default") // new query, new generation
+	calls := fc.metricCall
+	m = send(t, m, metricsTickMsg{gen: oldGen})
+	if fc.metricCall != calls {
+		t.Fatal("a tick from the previous query must not poll again")
+	}
+	m = send(t, m, metricsLoadedMsg{gen: oldGen, usage: map[string]k8s.Usage{"default/web": {CPUMilli: 1}}})
+	if m.resources.metrics["default/web"].CPUMilli == 1 {
+		t.Fatal("stale metrics applied")
 	}
 }

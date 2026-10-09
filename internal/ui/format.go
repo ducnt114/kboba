@@ -45,3 +45,15 @@ func trimZero(a int, unitA string, b int, unitB string) string {
 	}
 	return fmt.Sprintf("%d%s%d%s", a, unitA, b, unitB)
 }
+
+// formatCPU renders millicores the way kubectl top does: "250m".
+func formatCPU(milli int64) string {
+	return fmt.Sprintf("%dm", milli)
+}
+
+// formatMemory renders bytes in mebibytes, rounded: "128Mi". Always the same
+// unit, so the column sorts correctly (naturalLess compares the numbers).
+func formatMemory(bytes int64) string {
+	const mi = 1024 * 1024
+	return fmt.Sprintf("%dMi", (bytes+mi/2)/mi)
+}

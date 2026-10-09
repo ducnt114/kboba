@@ -51,6 +51,9 @@ type ResourceType struct {
 	Aliases    []string // other ":" commands (e.g. "po")
 	Namespaced bool
 	Columns    []Column // kind-specific columns; the UI adds NAMESPACE and AGE
+	// Metrics is true when metrics-server reports usage for this type
+	// (see ListMetrics); the UI then adds CPU and MEM columns.
+	Metrics bool
 
 	kind    string // e.g. "Deployment", for the YAML header
 	gvr     schema.GroupVersionResource
@@ -60,7 +63,7 @@ type ResourceType struct {
 
 var (
 	Pods = &ResourceType{
-		Name: "pods", Title: "Pods", Aliases: []string{"pod", "po"}, Namespaced: true,
+		Name: "pods", Title: "Pods", Aliases: []string{"pod", "po"}, Namespaced: true, Metrics: true,
 		Columns: []Column{{"NAME", 0}, {"READY", 7}, {"STATUS", 22}, {"RESTARTS", 9}},
 		kind:    "Pod",
 		gvr:     corev1.SchemeGroupVersion.WithResource("pods"),
@@ -100,7 +103,7 @@ var (
 		},
 	}
 	Nodes = &ResourceType{
-		Name: "nodes", Title: "Nodes", Aliases: []string{"node", "no"}, Namespaced: false,
+		Name: "nodes", Title: "Nodes", Aliases: []string{"node", "no"}, Namespaced: false, Metrics: true,
 		Columns: []Column{{"NAME", 0}, {"STATUS", 26}, {"ROLES", 16}, {"VERSION", 12}},
 		kind:    "Node",
 		gvr:     corev1.SchemeGroupVersion.WithResource("nodes"),
