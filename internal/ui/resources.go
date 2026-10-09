@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -84,7 +83,7 @@ var resourceKeyMap = resourceKeys{
 // ...), fed by an informer. What differs between types — the columns and
 // how an object becomes a row — comes from k8s.ResourceType.
 type resourcesView struct {
-	table  table.Model
+	table  tableModel
 	filter textinput.Model
 
 	q       resourceQuery
@@ -112,17 +111,8 @@ func newResourcesView() resourcesView {
 	ti.Prompt = "/"
 	ti.Placeholder = "filter by name"
 
-	t := table.New(table.WithFocused(true))
-	styles := table.DefaultStyles()
-	styles.Header = styles.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottom(true).
-		BorderForeground(colorMuted)
-	styles.Selected = styles.Selected.Foreground(lipgloss.Color("#FFFFFF")).Background(colorAccent)
-	t.SetStyles(styles)
-
 	return resourcesView{
-		table:  t,
+		table:  newTableModel(),
 		filter: ti,
 		q:      resourceQuery{rt: k8s.Pods},
 		items:  map[string]k8s.Resource{},
@@ -352,7 +342,7 @@ func nextSortColumn(titles []string, current string) string {
 // setColumns builds the table columns. The flexible column (Width 0) takes
 // the remaining width; the sorted column gets an arrow.
 func (v *resourcesView) setColumns() {
-	var cols []table.Column
+	var cols []tableColumn
 	for _, c := range v.columns() {
 		title := c.Title
 		if title == v.sortCol {
@@ -361,7 +351,7 @@ func (v *resourcesView) setColumns() {
 				c.Width = max(c.Width, lipgloss.Width(title)) // don't truncate the arrow away
 			}
 		}
-		cols = append(cols, table.Column{Title: title, Width: c.Width})
+		cols = append(cols, tableColumn{Title: title, Width: c.Width})
 	}
 
 	used, flex := 0, -1
@@ -375,8 +365,6 @@ func (v *resourcesView) setColumns() {
 		cols[flex].Width = max(v.width-used-2, 20)
 	}
 
-	// Rows must match the column count before columns change.
-	v.table.SetRows(nil)
 	v.table.SetColumns(cols)
 }
 
@@ -402,7 +390,7 @@ func (v *resourcesView) setRows(selectedKey string) {
 		if filter != "" && !strings.Contains(strings.ToLower(r.Name), filter) {
 			continue
 		}
-		row := make(table.Row, 0, len(r.Cells)+2)
+		row := make([]string, 0, len(r.Cells)+2)
 		if v.showNamespace() {
 			row = append(row, r.Namespace)
 		}
@@ -413,10 +401,12 @@ func (v *resourcesView) setRows(selectedKey string) {
 	sortEntries(entries, slices.Index(v.columnTitles(), v.sortCol), v.sortCol == "AGE", v.sortDesc)
 
 	keys := make([]string, len(entries))
-	rows := make([]table.Row, len(entries))
+	rows := make([][]string, len(entries))
+	styles := make([]lipgloss.Style, len(entries))
 	cursor := 0
 	for i, e := range entries {
 		keys[i], rows[i] = e.key, e.row
+		styles[i] = healthStyles[rowHealth(v.q.rt, e.res)]
 		if e.key == selectedKey {
 			cursor = i
 			if e.key == v.pendingSelect {
@@ -426,7 +416,7 @@ func (v *resourcesView) setRows(selectedKey string) {
 	}
 
 	v.rowKeys = keys
-	v.table.SetRows(rows)
+	v.table.SetRows(rows, styles)
 	v.table.SetCursor(cursor)
 }
 
@@ -434,7 +424,7 @@ func (v *resourcesView) setRows(selectedKey string) {
 type rowEntry struct {
 	key string
 	res k8s.Resource
-	row table.Row
+	row []string
 }
 
 // sortEntries orders rows by column col (-1: by key, i.e. namespace then

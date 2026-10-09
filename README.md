@@ -15,6 +15,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Namespaces**: pick a namespace, or "all namespaces".
 - **Pods, Deployments, Services, Events, Nodes**: live tables driven by
   informers, no polling (NAMESPACE column in all-namespaces mode).
+- **Colours** by health: failing rows red, pending/not-ready yellow,
+  completed grey.
 - **Drill-down**: from a deployment or service to its pods, `esc` to go
   back to where you were.
 - **Logs**: follow a container's logs, search with highlighting, wrap,

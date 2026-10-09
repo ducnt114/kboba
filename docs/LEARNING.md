@@ -25,6 +25,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 14. [Phase 2.3: Logs nâng cao](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous)
 15. [Phase 2.4: Drill-down và navigation stack](#15-phase-24-drill-down-và-navigation-stack)
 16. [Phase 2.5: Sắp xếp cột](#16-phase-25-sắp-xếp-cột)
+17. [Phase 2.6: Tô màu và table tự viết](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -96,7 +97,7 @@ Mỗi màn hình là một sub-model riêng, và tất cả có cùng "hợp đ�
 |------------------|----------------------------|-------------------|
 | `contextsView`   | `internal/ui/contexts.go`   | `list`            |
 | `namespacesView` | `internal/ui/namespaces.go` | `list`            |
-| `resourcesView`  | `internal/ui/resources.go`  | `table`, `textinput` |
+| `resourcesView`  | `internal/ui/resources.go`  | `textinput` + `tableModel` tự viết (`table.go`, từ phase 2.6; trước đó là bubbles `table`) |
 | `logsView`       | `internal/ui/logs.go`       | `viewport`        |
 | `detailView`     | `internal/ui/detail.go`     | `viewport` (describe + YAML) |
 
@@ -306,7 +307,7 @@ Các message của watch (`watchStartedMsg`, `resourceEventsMsg`, `watchClosedMs
 
 #### 4.6 Table (`internal/ui/resources.go`)
 
-- `setColumns`: cột NAME lấy phần chiều rộng còn lại, cột NAMESPACE chỉ hiện khi đang xem all namespaces. Trước khi `SetColumns` phải `SetRows(nil)`, vì table sẽ index `row[i]` theo số cột. Đổi từ 5 lên 6 cột mà rows cũ chỉ có 5 cell sẽ gây panic.
+- `setColumns`: cột NAME lấy phần chiều rộng còn lại, cột NAMESPACE chỉ hiện khi đang xem all namespaces. Với bubbles `table`, trước khi `SetColumns` phải `SetRows(nil)`, vì table sẽ index `row[i]` theo số cột; đổi từ 5 lên 6 cột mà rows cũ chỉ có 5 cell sẽ gây panic. (Từ phase 2.6 kboba dùng `tableModel` tự viết, vốn chịu được row thiếu cell, nên dòng `SetRows(nil)` đã được bỏ.)
 - `setRows(selectedKey)`: rebuild các row từ map, áp dụng filter, sort theo `namespace/name`, và **giữ cursor trên đúng pod** bằng key thay vì index. `rowKeys` song song với rows để tra ngược từ cursor ra `PodInfo`.
 - `ageTick`: timer UI 5 giây để cột AGE tự cập nhật. Timer này không gọi cluster. Chỉ có một chuỗi tick, bắt đầu từ `Init`.
 
@@ -501,7 +502,7 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 |---|---|---|
 | `list` tự xử lý Quit | `q`/`esc` trong list trả về `tea.Quit` | Tắt `KeyMap.Quit`, `KeyMap.ForceQuit` trong `newList` |
 | viewport gán `f` cho PageDown | `f` không bật/tắt follow mà lật trang | Định nghĩa lại `vp.KeyMap.PageDown` |
-| table gán `d` cho half page down | (có thể nuốt phím describe) | `resourcesView.handleKey` kiểm tra phím describe trước khi chuyển cho table |
+| bubbles table gán `d` cho half page down | (có thể nuốt phím describe) | `resourcesView.handleKey` kiểm tra phím describe trước khi chuyển cho table. `tableModel` (phase 2.6) không gán `d` |
 | klog ghi ra stderr | Log của client-go in đè lên TUI | `klog.SetLogger(logr.Discard())` |
 | Đóng channel khi handler còn gửi | panic `send on closed channel` | `close(stopCh)` → `Shutdown()` → `close(events)` |
 | Không đóng channel events | Cmd chờ bị kẹt mãi, leak goroutine | `Stop` luôn đóng `events` sau khi shutdown |
@@ -527,7 +528,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ✅ [mục 14](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous) |
 | 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ✅ [mục 15](#15-phase-24-drill-down-và-navigation-stack) |
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ✅ [mục 16](#16-phase-25-sắp-xếp-cột) |
-| 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ⏳ |
+| 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ✅ [mục 17](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết) |
 | 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ⏳ |
 | 2.8 | Cột CPU/MEM | So sánh poll và informer | ⏳ |
 | 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ⏳ |
@@ -956,4 +957,75 @@ Sắp xếp được mọi bảng theo bất kỳ cột nào:
 | Index cột thay đổi khi có hoặc mất cột NAMESPACE | Lưu cột bằng tiêu đề |
 | Mũi tên trong header bị cắt | Nới độ rộng cột |
 | Gửi nhiều phím quá nhanh (ví dụ qua `tmux send-keys "s s S"`) bị Bubble Tea gộp thành một `KeyMsg` nhiều rune, nên `key.Matches` không khớp | Không phải lỗi của app: người gõ phím bình thường không gặp. Khi test bằng tmux, gửi từng phím một |
+
+## 17. Phase 2.6: Tô màu theo trạng thái (và table tự viết)
+
+### Mục tiêu
+Thấy ngay vấn đề khi nhìn vào bảng, theo bốn mức:
+
+| Mức | Màu | Ví dụ |
+|---|---|---|
+| Lỗi | đỏ | CrashLoopBackOff, ImagePullBackOff, Error, OOMKilled, node NotReady |
+| Đang chờ | vàng | Pending, ContainerCreating, Terminating, `Init:0/1`; pod Running nhưng READY chưa đủ; deployment đang rollout; event Warning |
+| Đã xong | xám | Completed, Succeeded |
+| Bình thường | màu mặc định | mọi trường hợp còn lại |
+
+### Học được gì
+- **Giới hạn của component có sẵn**, và khi nào nên tự viết. bubbles `table` không dùng được với cell có màu vì hai lý do:
+  1. `renderRow` cắt chuỗi bằng `runewidth.Truncate`, hàm này đếm cả các byte của escape code ANSI là độ rộng, nên cột bị lệch hoặc mã màu bị cắt dở.
+  2. Dòng đang chọn được bọc *bên ngoài* bằng `Selected.Render(row)`; mã reset ở cuối mỗi cell có màu sẽ xóa luôn nền highlight cho phần còn lại của dòng.
+- **Cách viết một component Bubble Tea:** một struct có `Update(msg) (model, cmd)` và `View() string`, cộng với vài setter. Không cần gì thêm.
+- **Dữ liệu sạch, style áp lúc render:** các dòng luôn là text thuần; màu chỉ được thêm khi vẽ từng cell. Nhờ vậy việc tính độ rộng luôn đúng.
+- **Đo độ rộng theo ô hiển thị:** `ansi.StringWidth`/`ansi.Truncate` hiểu cả escape code lẫn ký tự rộng (CJK chiếm 2 ô).
+- **Chỉ render phần đang nhìn thấy:** với 2000 pod, chỉ khoảng 40 dòng được render mỗi frame.
+
+### Thể hiện trong code
+
+**Component table** (`internal/ui/table.go` → `tableModel`): API gần giống bubbles table (`SetColumns`, `SetRows`, `SetCursor`, `Cursor`, `SetWidth`, `SetHeight`, `Columns`, `Update`, `View`), nên `resourcesView` gần như chỉ phải đổi kiểu dữ liệu.
+
+- `SetRows(rows [][]string, styles []lipgloss.Style)`: style là *song song* với rows, mỗi dòng một style foreground. Dữ liệu và cách trình bày tách riêng.
+- `SetCursor` giữ con trỏ trong vùng nhìn thấy bằng `offset` (dòng đầu tiên đang hiển thị):
+
+  ```go
+  t.cursor = clamp(i, 0, len(t.rows)-1)
+  switch {
+  case t.cursor < t.offset:             t.offset = t.cursor              // cuộn lên
+  case t.cursor >= t.offset+body:       t.offset = t.cursor - body + 1   // cuộn xuống
+  }
+  t.offset = clamp(t.offset, 0, max(len(t.rows)-body, 0))                // không để trống ở cuối khi dòng bị xóa
+  ```
+
+- `View` chỉ vẽ các dòng từ `offset` tới `offset+bodyHeight`. Mỗi cell được vẽ là `style.Render(fitCell(value, width))`, trong đó style là `tableSelectedStyle` (nền accent, chữ trắng đậm) nếu là dòng đang chọn, hoặc style màu của dòng đó. Vì **mỗi cell tự mang style đầy đủ** (gồm cả padding), nền của dòng đang chọn phủ liền mạch, không bị mã reset của cell trước cắt ngang.
+- `fitCell`: `ansi.Truncate(s, width, "…")` rồi pad bằng dấu cách cho đủ `width - ansi.StringWidth(s)`, nên mọi dòng có cùng độ rộng hiển thị.
+- Keymap của table chỉ gồm các phím di chuyển (`↑↓ jk`, `pgup/pgdown/b/space`, `ctrl+u/ctrl+d`, `g/G/home/end`). Nó cố ý **không** dùng `d`, `u`, `f` như bubbles table, nên không giành phím của view.
+
+**Phân loại màu** (`internal/ui/colors.go`): đây là logic thuần, không có I/O.
+- `statusHealth(status)`: so khớp từ khóa theo thứ tự **lỗi → đang chờ → đã xong**. Thứ tự quan trọng: `"NotReady"` chứa `"Ready"`, và `"Init:Error"` bắt đầu bằng `"Init:"`; nếu kiểm tra sai thứ tự thì một node hỏng sẽ có màu như node khỏe.
+- `rowHealth(rt, resource)`: quyết định theo từng loại resource, và **chỉ dùng dữ liệu dòng đã có**, không gọi thêm API:
+  - Pods: dùng `Pod.Status`; nếu Running mà `allReady(Pod.Ready)` là false (readiness probe đang fail) thì vàng.
+  - Deployments: cell READY `a/b` với `a < b` thì vàng.
+  - Nodes: cột STATUS.
+  - Events: `Warning` thì vàng.
+  - Services: không bao giờ tô màu.
+- `healthStyles` dùng `lipgloss.AdaptiveColor`, nên màu vàng khác nhau trên nền sáng và nền tối.
+
+**Nối vào bảng** (`resourcesView.setRows`): trong vòng lặp tạo rows có thêm `styles[i] = healthStyles[rowHealth(v.q.rt, e.res)]`. Màu tự cập nhật theo informer, vì mỗi event đều dựng lại rows.
+
+### Test liên quan
+- `internal/ui/table_test.go`:
+  - `TestTableCursorScrolls`: offset khi cuộn, clamp, co lại khi dòng bị xóa, bảng rỗng;
+  - `TestTableKeys`: `j`, `G`, `pgup`, `g`; **`d` không di chuyển con trỏ**;
+  - `TestTableView`: header, chỉ vẽ các dòng nhìn thấy, cắt có `…`, mọi dòng cùng độ rộng (sau `ansi.Strip`);
+  - `TestFitCell`: ký tự rộng `日本語`.
+- `internal/ui/colors_test.go`: `TestStatusHealth` (bảng các trạng thái, đặc biệt `NotReady` và `Init:Error`), `TestRowHealth` (theo từng loại resource), `TestAllReady`.
+- Màu không được kiểm tra trực tiếp trong unit test: khi không có TTY, lipgloss không xuất escape code. Thay vào đó, test kiểm tra *mức* (`health`), còn màu thật được kiểm tra thủ công qua `tmux capture-pane -e`.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| bubbles table đếm escape code ANSI như ký tự | Tự viết `tableModel`, đo bằng `ansi.StringWidth` |
+| Mã reset màu của cell xóa mất nền của dòng đang chọn | Áp style cho từng cell thay vì bọc cả dòng |
+| `NotReady` khớp với `Ready`; `Init:Error` khớp với `Init:` | Kiểm tra lỗi trước |
+| Test không thấy màu vì không có TTY | Test mức `health`; kiểm tra màu thật bằng `tmux capture-pane -e` |
+| Ký tự rộng (CJK) làm lệch cột | `ansi.Truncate`/`StringWidth` tính theo ô hiển thị |
 

@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
-
 	"github.com/ducnt114/kboba/internal/k8s"
 )
 
@@ -51,7 +49,7 @@ func TestNaturalLess(t *testing.T) {
 func TestSortEntries(t *testing.T) {
 	now := time.Now()
 	mk := func(key, restarts string, age time.Duration) rowEntry {
-		return rowEntry{key: key, res: k8s.Resource{Created: now.Add(-age)}, row: table.Row{key, restarts}}
+		return rowEntry{key: key, res: k8s.Resource{Created: now.Add(-age)}, row: []string{key, restarts}}
 	}
 	entries := func() []rowEntry {
 		return []rowEntry{
