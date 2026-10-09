@@ -217,3 +217,11 @@ func TestLookupResourceType(t *testing.T) {
 		t.Error("unknown type should not be found")
 	}
 }
+
+func deploymentFixture() *appsv1.Deployment {
+	replicas := int32(1)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "web"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+}

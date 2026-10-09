@@ -17,6 +17,7 @@ phase-by-phase walkthrough of how and why it is built this way.
   informers, no polling (NAMESPACE column in all-namespaces mode).
 - **Logs**: follow a container's logs, toggle auto-scroll, cycle containers.
 - **Describe**: pod status, containers, conditions and related events.
+- **YAML**: any object as syntax-highlighted YAML (without managedFields).
 - Filter by name with `/`, k9s-style `:` commands, `?` for help.
 - Errors (connection refused, RBAC forbidden, deleted pods, unknown
   contexts) are shown in the status bar.
@@ -54,12 +55,14 @@ Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 |             | `esc`          | back / clear filter                  |
 |             | `q`, `ctrl+c`  | quit                                 |
 | tables      | `/`            | filter by name                       |
+|             | `y`            | YAML of the selected object          |
 | pods        | `enter`        | logs of the selected pod             |
 |             | `d`            | describe the selected pod            |
 | logs        | `f`            | toggle follow (auto-scroll)          |
 |             | `c`            | next container                       |
 |             | `↑↓ pgup pgdn` | scroll (scrolling up pauses follow)  |
-| describe    | `r`            | refresh                              |
+| describe, yaml | `r`         | refresh                              |
+| yaml        | `←/→`          | scroll horizontally                  |
 
 Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:svc`, `:events` (`:ev`),
 `:nodes` (`:no`), `:ctx [name]`, `:ns [name|all]`, `:q`.

@@ -35,7 +35,7 @@ const (
 	viewContexts
 	viewNamespaces
 	viewLogs
-	viewDescribe
+	viewDetail
 )
 
 // clientReadyMsg is sent once a client for a (new) context has been created.
@@ -62,7 +62,7 @@ type Model struct {
 	namespaces namespacesView
 	resources  resourcesView
 	logs       logsView
-	describe   describeView
+	detail     detailView
 
 	commandMode bool
 	command     textinput.Model
@@ -89,7 +89,7 @@ func New(newClient ClientFactory, opts Options) Model {
 		namespaces: newNamespacesView(),
 		resources:  newResourcesView(),
 		logs:       newLogsView(),
-		describe:   newDescribeView(),
+		detail:     newDetailView(),
 		command:    ti,
 		help:       help.New(),
 		status:     "connecting…",
@@ -153,8 +153,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case openDescribeMsg:
-		cmd := m.describe.open(m.client, msg.pod)
-		m.setActive(viewDescribe)
+		cmd := m.detail.openDescribe(m.client, msg.pod)
+		m.setActive(viewDetail)
+		return m, cmd
+
+	case openYAMLMsg:
+		cmd := m.detail.openYAML(m.client, msg.rt, msg.resource)
+		m.setActive(viewDetail)
 		return m, cmd
 
 	case backMsg:
@@ -184,9 +189,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logs, cmd = m.logs.Update(msg)
 		return m, cmd
 
-	case describeLoadedMsg:
+	case detailLoadedMsg:
 		var cmd tea.Cmd
-		m.describe, cmd = m.describe.Update(msg)
+		m.detail, cmd = m.detail.Update(msg)
 		return m, cmd
 	}
 
@@ -376,8 +381,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resources, cmd = m.resources.Update(msg)
 	case viewLogs:
 		m.logs, cmd = m.logs.Update(msg)
-	case viewDescribe:
-		m.describe, cmd = m.describe.Update(msg)
+	case viewDetail:
+		m.detail, cmd = m.detail.Update(msg)
 	}
 	return m, cmd
 }
@@ -392,8 +397,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.resources.capturingInput()
 	case viewLogs:
 		return m.logs.capturingInput()
-	case viewDescribe:
-		return m.describe.capturingInput()
+	case viewDetail:
+		return m.detail.capturingInput()
 	}
 	return false
 }
@@ -408,8 +413,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.resources.keys()}
 	case viewLogs:
 		return helpKeys{view: m.logs.keys()}
-	case viewDescribe:
-		return helpKeys{view: m.describe.keys()}
+	case viewDetail:
+		return helpKeys{view: m.detail.keys()}
 	}
 	return helpKeys{}
 }
@@ -427,7 +432,7 @@ func (m *Model) layout() {
 	m.namespaces.SetSize(m.width, h)
 	m.resources.SetSize(m.width, h)
 	m.logs.SetSize(m.width, h)
-	m.describe.SetSize(m.width, h)
+	m.detail.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -445,8 +450,8 @@ func (m Model) View() string {
 		body = m.resources.View()
 	case viewLogs:
 		body = m.logs.View()
-	case viewDescribe:
-		body = m.describe.View()
+	case viewDetail:
+		body = m.detail.View()
 	}
 
 	// Pin the body height so the status and help bars stay at the bottom.

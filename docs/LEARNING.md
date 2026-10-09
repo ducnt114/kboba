@@ -21,6 +21,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 **Phase 2**
 
 12. [Phase 2.1: Resource views](#12-phase-21-resource-views-deployments-services-events-nodes)
+13. [Phase 2.2: Xem YAML](#13-phase-22-xem-yaml-y)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -94,7 +95,7 @@ Mỗi màn hình là một sub-model riêng, và tất cả có cùng "hợp đ�
 | `namespacesView` | `internal/ui/namespaces.go` | `list`            |
 | `resourcesView`  | `internal/ui/resources.go`  | `table`, `textinput` |
 | `logsView`       | `internal/ui/logs.go`       | `viewport`        |
-| `describeView`   | `internal/ui/describe.go`   | `viewport`        |
+| `detailView`     | `internal/ui/detail.go`     | `viewport` (describe + YAML) |
 
 Mình **không** gom các sub-model vào một interface chung. Root dùng `switch m.active` trong 5 hàm: `updateActive`, `activeCapturingInput`, `activeKeys`, `layout` và `View`. Cách này hơi lặp lại, nhưng tường minh: đọc vào là biết ngay message đi đâu.
 
@@ -413,8 +414,8 @@ Phím `d` hiện chi tiết pod (status, containers, conditions, events). Filter
 - Có lọc lại phía client (`ev.InvolvedObject.Name == name`), vì không phải server nào (hay fake clientset) cũng tôn trọng field selector.
 - `formatPodDescription(pod, events, eventsErr, now)` là hàm thuần, nhận `now` làm tham số nên test không phụ thuộc thời gian thực. Bên trong dùng `duration.HumanDuration` của apimachinery để hiển thị thời gian giống kubectl.
 
-**Describe view** (`internal/ui/describe.go`):
-- `describeLoadedMsg` mang `key` của pod; kết quả không khớp với pod đang xem sẽ bị bỏ qua. Đây là biến thể của generation counter: dùng key thay cho số đếm.
+**Describe view** (ban đầu là `describeView` trong `internal/ui/describe.go`; từ [phase 2.2](#13-phase-22-xem-yaml-y) trở thành `detailView` trong `internal/ui/detail.go`):
+- Message kết quả mang id của request (ban đầu là `describeLoadedMsg.key`, hiện là `detailLoadedMsg.id`); kết quả không khớp với thứ đang xem sẽ bị bỏ qua. Đây là biến thể của generation counter: dùng id thay cho số đếm.
 - `render()` wrap text bằng `lipgloss.NewStyle().Width(w)`, và được gọi lại trong `SetSize` để wrap lại khi cửa sổ đổi kích thước.
 - Phím `r` để refresh, vì describe là một snapshot chứ không phải dữ liệu live.
 
@@ -451,10 +452,10 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 
 | Pattern | Ý tưởng | Ở đâu |
 |---|---|---|
-| **Không block trong `Update`** | Mọi I/O đều nằm trong một `tea.Cmd` | `connect`, `loadContexts`, `loadNamespaces`, `resourcesView.start`, `logsView.restart`, `describeView.load` |
+| **Không block trong `Update`** | Mọi I/O đều nằm trong một `tea.Cmd` | `connect`, `loadContexts`, `loadNamespaces`, `resourcesView.start`, `logsView.restart`, `detailView.refresh` |
 | **Subscription channel → Msg** | Cmd chờ channel, `Update` xử lý xong thì trả về Cmd chờ tiếp | `waitForResourceEvents`, `waitForLogLines` |
 | **Batching** | Chờ 1 phần tử, lấy thêm những gì có sẵn | `receiveBatch` (`stream.go`) |
-| **Generation / key guard** | Message mang theo "phiên"; phiên cũ thì bỏ qua | `resourcesView.gen`, `logsView.gen`, `describeLoadedMsg.key` |
+| **Generation / key guard** | Message mang theo "phiên"; phiên cũ thì bỏ qua | `resourcesView.gen`, `logsView.gen`, `detailLoadedMsg.id` |
 | **Stop rồi mới close** | Đóng stop channel → chờ producer thoát → đóng data channel | `WatchResources` (closure `stop`), `StreamLogs` (defer) |
 | **Một chỗ cleanup** | Rời logs view luôn đi qua `setActive` | `Model.setActive` |
 | **Con báo, cha quyết** | View phát message ý định; root đổi state | `contextSelectedMsg`, `namespaceSelectedMsg`, `openLogsMsg`, `openDescribeMsg`, `backMsg` |
@@ -519,7 +520,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | Phase | Tính năng | Học được gì | Trạng thái |
 |---|---|---|---|
 | 2.1 | View cho Deployments, Services, Events, Nodes | Tạo abstraction sau khi đã có ví dụ thật; generic informer | ✅ [mục 12](#12-phase-21-resource-views-deployments-services-events-nodes) |
-| 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ⏳ |
+| 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ✅ [mục 13](#13-phase-22-xem-yaml-y) |
 | 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ⏳ |
 | 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ⏳ |
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ⏳ |
@@ -643,4 +644,78 @@ Mọi thứ đã học ở phase (c), như thứ tự dừng, tombstone, `SetWat
 | Số cell khác số cột làm table panic | `TestEveryTypeHasMatchingCells` khóa lại cho mọi type |
 | Nodes là cluster-scoped, `WithNamespace("x")` sẽ không trả về gì | `WatchResources` ép `namespace = ""` khi `!rt.Namespaced`; UI không hiện cột NAMESPACE |
 | AGE của event theo `CreationTimestamp` gây hiểu nhầm (event được gộp và lặp lại) | `eventResource` đặt `Created = eventTime(ev)` (last seen) |
+
+## 13. Phase 2.2: Xem YAML (`y`)
+
+### Mục tiêu
+Bấm `y` trên bất kỳ dòng nào của bất kỳ bảng nào (pods, deployments, services, events, nodes) để xem manifest dạng YAML có tô màu, đã bỏ `managedFields`.
+
+### Học được gì
+- **TypeMeta trống:** object mà typed client trả về có `apiVersion` và `kind` rỗng (client-go dựa vào Go type thay cho TypeMeta). Muốn YAML giống `kubectl get -o yaml` thì phải tự điền lại.
+- **Không sửa object của informer cache:** object trong cache được chia sẻ giữa các consumer. Ở đây ta `Get` một bản mới từ API rồi mới sửa (bỏ managedFields).
+- **"Lần dùng thứ hai thì tổng quát hóa":** describe và YAML đều là "lấy text, hiện trong viewport, cho refresh". Nên `describeView` được đổi thành `detailView`, nhận một *loader function*.
+- **Highlight cú pháp** bằng chroma, và chọn theme theo màu nền terminal.
+- **Cuộn ngang trong viewport:** mặc định bước cuộn ngang là 0, phải gọi `SetHorizontalStep`.
+
+### Thể hiện trong code
+
+**Lấy object theo từng loại** (`internal/k8s/resources.go`): `ResourceType` có thêm hai field unexported:
+- `kind` (ví dụ `"Deployment"`);
+- `get func(ctx, cs, ns, name) (runtime.Object, error)`: mỗi type dùng typed client tương ứng, ví dụ `cs.AppsV1().Deployments(ns).Get(...)`.
+
+Thêm một loại resource vẫn chỉ là thêm một giá trị vào registry.
+
+**Render YAML** (`internal/k8s/yaml.go`):
+
+```go
+func toYAML(rt *ResourceType, obj runtime.Object) (string, error) {
+    obj.GetObjectKind().SetGroupVersionKind(rt.gvr.GroupVersion().WithKind(rt.kind)) // điền lại apiVersion/kind
+    if m, err := meta.Accessor(obj); err == nil {
+        m.SetManagedFields(nil)                                                   // bỏ phần dài, ít giá trị
+    }
+    out, err := yaml.Marshal(obj)                                                 // sigs.k8s.io/yaml: JSON tags → YAML
+    ...
+}
+```
+
+- `meta.Accessor` cho phép thao tác metadata của *bất kỳ* object nào mà không cần biết kiểu cụ thể.
+- `sigs.k8s.io/yaml` marshal qua JSON, nên dùng đúng các tag `json:"..."` của Kubernetes, cho ra key `camelCase` giống kubectl.
+- `GetYAML` bỏ qua namespace với type cluster-scoped, giống `WatchResources`.
+
+**Một view cho mọi text snapshot** (`internal/ui/detail.go` → `detailView`):
+
+```go
+type detailLoader func(ctx context.Context) (string, error)
+
+func (v *detailView) open(title, id string, wrap bool, load detailLoader) tea.Cmd
+func (v *detailView) openDescribe(c k8s.Client, pod k8s.PodInfo) tea.Cmd   // wrap = true
+func (v *detailView) openYAML(c k8s.Client, rt *k8s.ResourceType, r k8s.Resource) tea.Cmd // wrap = false
+```
+
+- View không biết nó đang hiện describe hay YAML: nó chỉ giữ một `load` closure và gọi lại khi bấm `r`.
+- `id` (ví dụ `"yaml:deployments:team-a/api"`) thay cho `key` của describe cũ; mục đích vẫn là chặn kết quả trễ.
+- `wrap`: describe thì wrap dòng dài. YAML thì **không** wrap (wrap làm hỏng thụt lề, mà thụt lề chính là cú pháp của YAML), thay vào đó cuộn ngang bằng ←/→ (`vp.SetHorizontalStep(4)`).
+- `highlightYAML` chạy *bên trong loader*, tức là trong goroutine của Cmd, nên việc highlight một manifest lớn không làm chậm `Update`. Nếu chroma lỗi thì trả về text gốc, vì tô màu không phải lý do để báo lỗi.
+- Theme: `lipgloss.HasDarkBackground()` → `monokai` hoặc `github`. lipgloss chỉ hỏi terminal một lần (lần render đầu) rồi cache lại, nên gọi hàm này trong Cmd không tranh stdin với Bubble Tea.
+- Viewport cắt dòng dài theo độ rộng hiển thị và **hiểu ANSI** (`ansi.Cut` trong `visibleLines`), nên text có màu vẫn cuộn ngang đúng.
+
+**Phím `y`** (`resourcesView.handleKey`): hoạt động với mọi type, phát `openYAMLMsg{rt, resource}`; root gọi `m.detail.openYAML(...)`.
+
+**Interface:** thêm `GetYAML(ctx, rt, namespace, name)`. Đây là verb `get`, có trong allowlist, và `TestClientOnlyReads` gọi nó cho mọi `ResourceType`.
+
+### Test liên quan
+- `internal/k8s/yaml_test.go`:
+  - `TestGetYAML`: có `apiVersion`/`kind`, `managedFields` đã bị bỏ;
+  - `TestGetYAMLClusterScoped`;
+  - `TestGetYAMLAppsGroup`: `apiVersion: apps/v1`;
+  - `TestGetYAMLNotFound`.
+- `internal/ui/root_test.go` → `TestYAMLForAnyResourceType`: `y` trên deployment, nội dung (sau `ansi.Strip`), không wrap, Esc quay lại đúng bảng deployments.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| YAML thiếu `apiVersion`/`kind` | `SetGroupVersionKind` trước khi marshal |
+| Sửa object trong cache của informer làm hỏng dữ liệu của consumer khác | Luôn `Get` bản mới từ API |
+| Wrap làm hỏng thụt lề YAML | `wrap=false` + cuộn ngang |
+| Viewport mặc định không cuộn ngang | `SetHorizontalStep(4)` |
 

@@ -35,6 +35,9 @@ type Client interface {
 	// the returned watch.
 	WatchResources(rt *ResourceType, namespace string) (*ResourceWatch, error)
 
+	// GetYAML returns one object as YAML (without managedFields).
+	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
+
 	// GetPod returns a single pod.
 	GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error)
 

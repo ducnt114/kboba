@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,8 +11,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -44,40 +47,62 @@ type ResourceType struct {
 	Namespaced bool
 	Columns    []Column // kind-specific columns; the UI adds NAMESPACE and AGE
 
+	kind    string // e.g. "Deployment", for the YAML header
 	gvr     schema.GroupVersionResource
 	convert func(obj any) (Resource, bool)
+	get     func(ctx context.Context, cs kubernetes.Interface, namespace, name string) (runtime.Object, error)
 }
 
 var (
 	Pods = &ResourceType{
 		Name: "pods", Title: "Pods", Aliases: []string{"pod", "po"}, Namespaced: true,
 		Columns: []Column{{"NAME", 0}, {"READY", 7}, {"STATUS", 22}, {"RESTARTS", 9}},
+		kind:    "Pod",
 		gvr:     corev1.SchemeGroupVersion.WithResource("pods"),
 		convert: typed(podResource),
+		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
+			return cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		},
 	}
 	Deployments = &ResourceType{
 		Name: "deployments", Title: "Deployments", Aliases: []string{"deployment", "deploy", "dp"}, Namespaced: true,
 		Columns: []Column{{"NAME", 0}, {"READY", 9}, {"UP-TO-DATE", 10}, {"AVAILABLE", 9}},
+		kind:    "Deployment",
 		gvr:     appsv1.SchemeGroupVersion.WithResource("deployments"),
 		convert: typed(deploymentResource),
+		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
+			return cs.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		},
 	}
 	Services = &ResourceType{
 		Name: "services", Title: "Services", Aliases: []string{"service", "svc"}, Namespaced: true,
 		Columns: []Column{{"NAME", 0}, {"TYPE", 12}, {"CLUSTER-IP", 15}, {"EXTERNAL-IP", 15}, {"PORT(S)", 22}},
+		kind:    "Service",
 		gvr:     corev1.SchemeGroupVersion.WithResource("services"),
 		convert: typed(serviceResource),
+		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
+			return cs.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+		},
 	}
 	Events = &ResourceType{
 		Name: "events", Title: "Events", Aliases: []string{"event", "ev"}, Namespaced: true,
 		Columns: []Column{{"TYPE", 8}, {"REASON", 20}, {"OBJECT", 30}, {"MESSAGE", 0}},
+		kind:    "Event",
 		gvr:     corev1.SchemeGroupVersion.WithResource("events"),
 		convert: typed(eventResource),
+		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
+			return cs.CoreV1().Events(ns).Get(ctx, name, metav1.GetOptions{})
+		},
 	}
 	Nodes = &ResourceType{
 		Name: "nodes", Title: "Nodes", Aliases: []string{"node", "no"}, Namespaced: false,
 		Columns: []Column{{"NAME", 0}, {"STATUS", 26}, {"ROLES", 16}, {"VERSION", 12}},
+		kind:    "Node",
 		gvr:     corev1.SchemeGroupVersion.WithResource("nodes"),
 		convert: typed(nodeResource),
+		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
+			return cs.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+		},
 	}
 )
 

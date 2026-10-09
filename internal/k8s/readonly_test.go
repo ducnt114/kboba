@@ -17,6 +17,7 @@ var readOnlyMethods = []string{
 	"ListNamespaces",
 	"ListPods",
 	"WatchResources",
+	"GetYAML",
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
@@ -97,6 +98,10 @@ func TestClientOnlyReads(t *testing.T) {
 	}
 	if _, err := c.DescribePod(ctx, "default", "web"); err != nil {
 		t.Fatal(err)
+	}
+	for _, rt := range ResourceTypes() {
+		// Not-found is fine: we only care about the verb that was used.
+		_, _ = c.GetYAML(ctx, rt, "default", "web")
 	}
 
 	actions := cs.Actions()

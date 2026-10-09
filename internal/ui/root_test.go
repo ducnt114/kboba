@@ -3,11 +3,13 @@ package ui
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ducnt114/kboba/internal/k8s"
@@ -118,6 +120,10 @@ func (f *fakeClient) DescribePod(_ context.Context, ns, name string) (string, er
 		}
 	}
 	return "", errors.New("pods \"" + name + "\" not found")
+}
+
+func (f *fakeClient) GetYAML(_ context.Context, rt *k8s.ResourceType, ns, name string) (string, error) {
+	return "kind: " + rt.Name + "\nmetadata:\n  name: " + name + "\n  namespace: " + ns + "\n", nil
 }
 
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
@@ -429,17 +435,17 @@ func TestDescribe(t *testing.T) {
 	m := startModel(t, Options{})
 
 	m = send(t, m, press("d"))
-	if m.active != viewDescribe {
+	if m.active != viewDetail {
 		t.Fatalf("active view = %v, want describe", m.active)
 	}
-	if m.describe.text != "Name: api" {
-		t.Fatalf("describe text = %q", m.describe.text)
+	if m.detail.text != "Name: api" {
+		t.Fatalf("describe text = %q", m.detail.text)
 	}
 
 	// A late result for another pod must not replace the current one.
-	m = send(t, m, describeLoadedMsg{key: "team-a/worker", text: "Name: worker"})
-	if m.describe.text != "Name: api" {
-		t.Fatalf("stale describe applied: %q", m.describe.text)
+	m = send(t, m, detailLoadedMsg{id: "describe:team-a/worker", text: "Name: worker"})
+	if m.detail.text != "Name: api" {
+		t.Fatalf("stale describe applied: %q", m.detail.text)
 	}
 
 	m = send(t, m, press("esc"))
@@ -524,5 +530,27 @@ func TestUnknownResourceCommand(t *testing.T) {
 	m = typeCommand(t, m, "secrets")
 	if !m.statusIsErr || m.resources.rt != k8s.Pods {
 		t.Fatalf("status=%q rt=%s", m.status, m.resources.rt.Name)
+	}
+}
+
+func TestYAMLForAnyResourceType(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+
+	m = send(t, m, press("y"))
+	if m.active != viewDetail {
+		t.Fatalf("active view = %v, want detail", m.active)
+	}
+	text := ansi.Strip(m.detail.text)
+	if !strings.Contains(text, "kind: deployments") || !strings.Contains(text, "name: api") {
+		t.Fatalf("yaml = %q", text)
+	}
+	if m.detail.wrap {
+		t.Fatal("YAML should scroll horizontally, not wrap")
+	}
+
+	m = send(t, m, press("esc"))
+	if m.active != viewResources || m.resources.rt != k8s.Deployments {
+		t.Fatalf("esc should return to the deployments table")
 	}
 }

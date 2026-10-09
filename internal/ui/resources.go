@@ -36,14 +36,19 @@ type (
 	ageTickMsg     struct{}
 )
 
-// openLogsMsg / openDescribeMsg ask the root model to open a pod's view.
+// openLogsMsg / openDescribeMsg / openYAMLMsg ask the root model to open
+// another view for the selected row.
 type (
 	openLogsMsg     struct{ pod k8s.PodInfo }
 	openDescribeMsg struct{ pod k8s.PodInfo }
+	openYAMLMsg     struct {
+		rt       *k8s.ResourceType
+		resource k8s.Resource
+	}
 )
 
 type resourceKeys struct {
-	Up, Down, Logs, Describe, Filter key.Binding
+	Up, Down, Logs, Describe, YAML, Filter key.Binding
 }
 
 var resourceKeyMap = resourceKeys{
@@ -51,6 +56,7 @@ var resourceKeyMap = resourceKeys{
 	Down:     listKeyMap.Down,
 	Logs:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "logs")),
 	Describe: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
+	YAML:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yaml")),
 	Filter:   listKeyMap.Filter,
 }
 
@@ -231,6 +237,12 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 			return v, func() tea.Msg { return openDescribeMsg{pod: p} }
 		}
 		return v, nil
+	case key.Matches(msg, resourceKeyMap.YAML):
+		if r, ok := v.selected(); ok {
+			rt := v.rt
+			return v, func() tea.Msg { return openYAMLMsg{rt: rt, resource: r} }
+		}
+		return v, nil
 	}
 
 	var cmd tea.Cmd
@@ -367,7 +379,7 @@ func (v resourcesView) keys() []key.Binding {
 	if v.rt == k8s.Pods {
 		b = append(b, k.Logs, k.Describe)
 	}
-	b = append(b, k.Filter)
+	b = append(b, k.YAML, k.Filter)
 	if v.filter.Value() != "" {
 		b = append(b, key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear filter")))
 	}
