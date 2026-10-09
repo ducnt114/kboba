@@ -1,0 +1,60 @@
+# kboba-readonly: cluster-wide read-only access (get/list/watch only).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kboba-readonly
+  namespace: kboba-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kboba-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "namespaces", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kboba-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kboba-readonly
+subjects:
+  - kind: ServiceAccount
+    name: kboba-readonly
+    namespace: kboba-demo
+---
+# kboba-limited: read-only, and only inside kboba-demo. Listing namespaces
+# or pods in "all namespaces" is forbidden, to exercise kboba's error paths.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kboba-limited
+  namespace: kboba-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kboba-limited
+  namespace: kboba-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kboba-limited
+  namespace: kboba-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kboba-limited
+subjects:
+  - kind: ServiceAccount
+    name: kboba-limited
+    namespace: kboba-demo

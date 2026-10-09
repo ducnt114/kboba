@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -25,6 +26,16 @@ type Client interface {
 
 	// ListNamespaces returns the namespace names, sorted.
 	ListNamespaces(ctx context.Context) ([]string, error)
+
+	// ListPods returns the pods of namespace ("" for all), sorted.
+	ListPods(ctx context.Context, namespace string) ([]PodInfo, error)
+
+	// WatchPods starts an informer that streams pod changes in namespace
+	// ("" for all). The caller must call Stop on the returned watch.
+	WatchPods(namespace string) (*PodWatch, error)
+
+	// GetPod returns a single pod.
+	GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error)
 }
 
 // client is the real Client implementation. It is bound to a single

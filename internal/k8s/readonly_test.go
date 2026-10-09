@@ -15,6 +15,9 @@ import (
 var readOnlyMethods = []string{
 	"ListContexts",
 	"ListNamespaces",
+	"ListPods",
+	"WatchPods",
+	"GetPod",
 }
 
 func TestClientInterfaceIsReadOnly(t *testing.T) {
@@ -61,7 +64,7 @@ func TestReadOnlyTransportRejectsWrites(t *testing.T) {
 // TestClientOnlyReads calls every Client method against the fake clientset
 // and checks that the recorded API actions are all get, list or watch.
 func TestClientOnlyReads(t *testing.T) {
-	c, cs := newFakeClient(t, ns("default"))
+	c, cs := newFakeClient(t, ns("default"), pod("default", "web"))
 	ctx := context.Background()
 
 	if _, err := c.ListContexts(); err != nil {
@@ -70,6 +73,18 @@ func TestClientOnlyReads(t *testing.T) {
 	if _, err := c.ListNamespaces(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := c.ListPods(ctx, "default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetPod(ctx, "default", "web"); err != nil {
+		t.Fatal(err)
+	}
+	w, err := c.WatchPods("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextEvent(t, w.Events, PodsSynced)
+	w.Stop()
 
 	actions := cs.Actions()
 	if len(actions) == 0 {

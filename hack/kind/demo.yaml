@@ -1,0 +1,57 @@
+# Sample workloads for trying kboba against a local kind cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kboba-demo
+---
+# Logs a line every second: good for testing log follow.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chatty
+  namespace: kboba-demo
+spec:
+  containers:
+    - name: logger
+      image: busybox:1.36
+      command: ["sh", "-c", "i=0; while true; do echo \"$(date -Iseconds) tick $i\"; i=$((i+1)); sleep 1; done"]
+---
+# Exits with an error after a few seconds: ends up in CrashLoopBackOff.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashloop
+  namespace: kboba-demo
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "echo starting; sleep 3; echo 'something went wrong' >&2; exit 1"]
+---
+# Two containers; the annotation picks the default one for logs.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi
+  namespace: kboba-demo
+  annotations:
+    kubectl.kubernetes.io/default-container: app
+spec:
+  containers:
+    - name: sidecar
+      image: busybox:1.36
+      command: ["sh", "-c", "while true; do echo sidecar heartbeat; sleep 5; done"]
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "while true; do echo app is working; sleep 2; done"]
+---
+# Image does not exist: ErrImagePull / ImagePullBackOff.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-image
+  namespace: kboba-demo
+spec:
+  containers:
+    - name: app
+      image: example.invalid/does-not-exist:latest

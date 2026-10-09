@@ -31,7 +31,8 @@ type Options struct {
 type viewID int
 
 const (
-	viewContexts viewID = iota
+	viewPods viewID = iota
+	viewContexts
 	viewNamespaces
 )
 
@@ -57,6 +58,7 @@ type Model struct {
 	active     viewID
 	contexts   contextsView
 	namespaces namespacesView
+	pods       podsView
 
 	commandMode bool
 	command     textinput.Model
@@ -66,6 +68,7 @@ type Model struct {
 	statusIsErr bool
 
 	width, height int
+	bodyHeight    int
 }
 
 // New returns the root model.
@@ -77,9 +80,10 @@ func New(newClient ClientFactory, opts Options) Model {
 	return Model{
 		newClient:  newClient,
 		opts:       opts,
-		active:     viewContexts,
+		active:     viewPods,
 		contexts:   newContextsView(),
 		namespaces: newNamespacesView(),
+		pods:       newPodsView(),
 		command:    ti,
 		help:       help.New(),
 		status:     "connecting…",
@@ -87,7 +91,7 @@ func New(newClient ClientFactory, opts Options) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return connect(m.newClient, m.opts.Context)
+	return tea.Batch(connect(m.newClient, m.opts.Context), ageTick())
 }
 
 // connect builds a client for contextName off the UI goroutine.
@@ -138,6 +142,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.switchNamespace(msg.namespace)
 
 	case backMsg:
+		if m.client != nil {
+			m.setActive(viewPods)
+		}
 		return m, nil
 
 	case contextsLoadedMsg:
@@ -148,6 +155,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case namespacesLoadedMsg:
 		var cmd tea.Cmd
 		m.namespaces, cmd = m.namespaces.Update(msg)
+		return m, cmd
+
+	// The pod watch keeps running whatever view is active.
+	case podWatchStartedMsg, podEventsMsg, podWatchClosedMsg, ageTickMsg:
+		var cmd tea.Cmd
+		m.pods, cmd = m.pods.Update(msg)
 		return m, cmd
 	}
 
@@ -225,6 +238,11 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 			return m.switchNamespace(arg)
 		}
 		return m.showNamespaces()
+	case "pods", "pod", "po":
+		if m.client != nil {
+			m.setActive(viewPods)
+		}
+		return m, nil
 	case "q", "quit":
 		return m, tea.Quit
 	}
@@ -260,7 +278,10 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	m.status, m.statusIsErr = fmt.Sprintf("context %q", m.context), false
 	var cmd tea.Cmd
 	m.contexts, cmd = m.contexts.Update(contextsLoadedMsg{contexts: msg.contexts})
-	return m, cmd
+	// start stops the previous context's informer before creating a new one.
+	watchCmd := m.pods.start(m.client, m.namespace)
+	m.setActive(viewPods)
+	return m, tea.Batch(cmd, watchCmd)
 }
 
 func (m Model) switchContext(name string) (tea.Model, tea.Cmd) {
@@ -271,7 +292,12 @@ func (m Model) switchContext(name string) (tea.Model, tea.Cmd) {
 func (m Model) switchNamespace(ns string) (tea.Model, tea.Cmd) {
 	m.namespace = ns
 	m.status, m.statusIsErr = "", false
-	return m, nil
+	if m.client == nil {
+		return m, nil
+	}
+	cmd := m.pods.start(m.client, ns)
+	m.setActive(viewPods)
+	return m, cmd
 }
 
 func (m Model) showNamespaces() (tea.Model, tea.Cmd) {
@@ -304,6 +330,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.contexts, cmd = m.contexts.Update(msg)
 	case viewNamespaces:
 		m.namespaces, cmd = m.namespaces.Update(msg)
+	case viewPods:
+		m.pods, cmd = m.pods.Update(msg)
 	}
 	return m, cmd
 }
@@ -314,6 +342,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.contexts.capturingInput()
 	case viewNamespaces:
 		return m.namespaces.capturingInput()
+	case viewPods:
+		return m.pods.capturingInput()
 	}
 	return false
 }
@@ -324,6 +354,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.contexts.keys()}
 	case viewNamespaces:
 		return helpKeys{view: m.namespaces.keys()}
+	case viewPods:
+		return helpKeys{view: m.pods.keys()}
 	}
 	return helpKeys{}
 }
@@ -336,8 +368,10 @@ func (m *Model) layout() {
 	// header + status line + help bar
 	chrome := 2 + lipgloss.Height(m.help.View(m.activeKeys()))
 	h := max(m.height-chrome, 1)
+	m.bodyHeight = h
 	m.contexts.SetSize(m.width, h)
 	m.namespaces.SetSize(m.width, h)
+	m.pods.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -351,7 +385,12 @@ func (m Model) View() string {
 		body = m.contexts.View()
 	case viewNamespaces:
 		body = m.namespaces.View()
+	case viewPods:
+		body = m.pods.View()
 	}
+
+	// Pin the body height so the status and help bars stay at the bottom.
+	body = lipgloss.NewStyle().Height(m.bodyHeight).MaxHeight(m.bodyHeight).Render(body)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.headerView(),

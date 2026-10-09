@@ -3,10 +3,12 @@ package ui
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ducnt114/kboba/internal/k8s"
 )
@@ -17,6 +19,16 @@ type fakeClient struct {
 	contexts   []k8s.ContextInfo
 	namespaces []string
 	nsErr      error
+	pods       []k8s.PodInfo
+	watches    []*fakeWatch
+}
+
+// fakeWatch is a pod watch whose events are queued up front (initial pods
+// followed by PodsSynced), like an informer's initial list.
+type fakeWatch struct {
+	namespace string
+	stopped   bool
+	*k8s.PodWatch
 }
 
 func (f *fakeClient) ListContexts() ([]k8s.ContextInfo, error) {
@@ -32,12 +44,53 @@ func (f *fakeClient) ListNamespaces(context.Context) ([]string, error) {
 	return f.namespaces, f.nsErr
 }
 
+func (f *fakeClient) ListPods(_ context.Context, ns string) ([]k8s.PodInfo, error) {
+	var out []k8s.PodInfo
+	for _, p := range f.pods {
+		if ns == "" || p.Namespace == ns {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeClient) GetPod(context.Context, string, string) (*corev1.Pod, error) {
+	return &corev1.Pod{}, nil
+}
+
+func (f *fakeClient) WatchPods(ns string) (*k8s.PodWatch, error) {
+	pods, _ := f.ListPods(context.Background(), ns)
+	ch := make(chan k8s.PodEvent, len(pods)+1)
+	for _, p := range pods {
+		ch <- k8s.PodEvent{Type: k8s.PodUpserted, Pod: p}
+	}
+	ch <- k8s.PodEvent{Type: k8s.PodsSynced}
+
+	w := &fakeWatch{namespace: ns}
+	var once sync.Once
+	w.PodWatch = &k8s.PodWatch{
+		Events: ch,
+		Stop:   func() { once.Do(func() { w.stopped = true; close(ch) }) },
+	}
+	f.watches = append(f.watches, w)
+	return w.PodWatch, nil
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
 			name = contexts[0].Name
 		}
-		return &fakeClient{context: name, contexts: contexts, namespaces: []string{"default", "team-a"}}, nil
+		return &fakeClient{
+			context:    name,
+			contexts:   contexts,
+			namespaces: []string{"default", "team-a"},
+			pods: []k8s.PodInfo{
+				{Namespace: "team-a", Name: "api"},
+				{Namespace: "team-a", Name: "worker"},
+				{Namespace: "default", Name: "web"},
+			},
+		}, nil
 	}
 }
 
@@ -97,7 +150,10 @@ func startModel(t *testing.T, opts Options) Model {
 		k8s.ContextInfo{Name: "prod"},
 	), opts)
 	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	return send(t, m, m.Init()())
+	for _, msg := range runCmd(m.Init()) {
+		m = send(t, m, msg)
+	}
+	return m
 }
 
 func TestStartupUsesContextNamespace(t *testing.T) {
@@ -176,5 +232,77 @@ func TestNamespacesForbiddenFallsBack(t *testing.T) {
 	// "(all namespaces)" + the current namespace remain selectable.
 	if n := len(m.namespaces.list.Items()); n != 2 {
 		t.Fatalf("got %d items, want 2", n)
+	}
+}
+
+func TestPodsWatchLifecycle(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	if m.active != viewPods {
+		t.Fatalf("active view = %v, want pods", m.active)
+	}
+	if len(fc.watches) != 1 || fc.watches[0].namespace != "team-a" {
+		t.Fatalf("watches = %+v", fc.watches)
+	}
+	if got := len(m.pods.rowKeys); got != 2 {
+		t.Fatalf("pods table has %d rows, want 2", got)
+	}
+	oldGen := m.pods.gen
+
+	// Switching namespace must stop the old informer before starting a new one.
+	m = typeCommand(t, m, "ns all")
+	if !fc.watches[0].stopped {
+		t.Fatal("old watch was not stopped")
+	}
+	if len(fc.watches) != 2 || fc.watches[1].namespace != "" {
+		t.Fatalf("expected a new all-namespaces watch, got %+v", fc.watches)
+	}
+	if got := len(m.pods.rowKeys); got != 3 {
+		t.Fatalf("pods table has %d rows, want 3", got)
+	}
+	if cols := m.pods.table.Columns(); cols[0].Title != "NAMESPACE" {
+		t.Fatalf("first column = %q, want NAMESPACE", cols[0].Title)
+	}
+
+	// A late event from the old watch must be ignored.
+	m = send(t, m, podEventsMsg{gen: oldGen, events: []k8s.PodEvent{
+		{Type: k8s.PodUpserted, Pod: k8s.PodInfo{Namespace: "team-a", Name: "ghost"}},
+	}})
+	if got := len(m.pods.rowKeys); got != 3 {
+		t.Fatalf("stale event changed the table: %d rows", got)
+	}
+}
+
+func TestPodsWatchStoppedOnContextSwitch(t *testing.T) {
+	m := startModel(t, Options{})
+	old := m.client.(*fakeClient)
+
+	m = send(t, m, contextSelectedMsg{name: "prod"})
+	if !old.watches[0].stopped {
+		t.Fatal("watch of the previous context was not stopped")
+	}
+	if m.pods.namespace != "default" {
+		t.Fatalf("pods namespace = %q", m.pods.namespace)
+	}
+}
+
+func TestPodsFilter(t *testing.T) {
+	m := startModel(t, Options{})
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !m.pods.capturingInput() {
+		t.Fatal("filter should have focus")
+	}
+	// "q" must be typed into the filter, not quit the app.
+	for _, r := range "wor" {
+		m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.pods.rowKeys) != 1 || m.pods.rowKeys[0] != "team-a/worker" {
+		t.Fatalf("filtered rows = %v", m.pods.rowKeys)
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if len(m.pods.rowKeys) != 2 {
+		t.Fatalf("esc should clear the filter, rows = %v", m.pods.rowKeys)
 	}
 }
