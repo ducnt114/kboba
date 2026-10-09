@@ -15,6 +15,16 @@ const (
 	maxLogLineBytes = 1024 * 1024
 )
 
+// LogOptions are the user-tunable parts of a log request.
+type LogOptions struct {
+	// Timestamps prefixes every line with its RFC3339 timestamp.
+	Timestamps bool
+	// Previous shows the logs of the previous (terminated) instance of the
+	// container, e.g. before the last crash. Such a stream is not followed:
+	// that container will never write again.
+	Previous bool
+}
+
 // StreamLogs follows the logs of one container (GET pods/log?follow=true).
 //
 // Lines are delivered on the first channel, which is closed when the stream
@@ -24,13 +34,19 @@ const (
 //
 // Cancel ctx to stop streaming; this closes the HTTP connection and ends
 // the reader goroutine.
-func (c *client) StreamLogs(ctx context.Context, namespace, pod, container string) (<-chan string, <-chan error, error) {
+func (c *client) StreamLogs(ctx context.Context, namespace, pod, container string, o LogOptions) (<-chan string, <-chan error, error) {
 	if c.connErr != nil {
 		return nil, nil, c.connErr
 	}
 
 	tail := int64(logTailLines)
-	opts := &corev1.PodLogOptions{Container: container, Follow: true, TailLines: &tail}
+	opts := &corev1.PodLogOptions{
+		Container:  container,
+		Follow:     !o.Previous,
+		TailLines:  &tail,
+		Timestamps: o.Timestamps,
+		Previous:   o.Previous,
+	}
 	body, err := c.clientset.CoreV1().Pods(namespace).GetLogs(pod, opts).Stream(ctx)
 	if err != nil {
 		return nil, nil, err

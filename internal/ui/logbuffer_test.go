@@ -48,4 +48,8 @@ func TestRingBufferLogCapacity(t *testing.T) {
 	if r.at(0) != "123" || r.at(maxLogLines-1) != strconv.Itoa(maxLogLines+122) {
 		t.Fatalf("oldest=%q newest=%q", r.at(0), r.at(maxLogLines-1))
 	}
+	// Absolute line numbers survive eviction: line 123 was the 124th pushed.
+	if r.dropped != 123 {
+		t.Fatalf("dropped = %d", r.dropped)
+	}
 }

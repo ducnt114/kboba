@@ -42,7 +42,7 @@ type Client interface {
 	GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error)
 
 	// StreamLogs follows a container's logs until ctx is cancelled.
-	StreamLogs(ctx context.Context, namespace, pod, container string) (<-chan string, <-chan error, error)
+	StreamLogs(ctx context.Context, namespace, pod, container string, opts LogOptions) (<-chan string, <-chan error, error)
 
 	// DescribePod returns a human-readable description of a pod and its
 	// events, similar to `kubectl describe pod`.

@@ -15,7 +15,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Namespaces**: pick a namespace, or "all namespaces".
 - **Pods, Deployments, Services, Events, Nodes**: live tables driven by
   informers, no polling (NAMESPACE column in all-namespaces mode).
-- **Logs**: follow a container's logs, toggle auto-scroll, cycle containers.
+- **Logs**: follow a container's logs, search with highlighting, wrap,
+  timestamps, `--previous`, cycle containers.
 - **Describe**: pod status, containers, conditions and related events.
 - **YAML**: any object as syntax-highlighted YAML (without managedFields).
 - Filter by name with `/`, k9s-style `:` commands, `?` for help.
@@ -59,8 +60,12 @@ Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 | pods        | `enter`        | logs of the selected pod             |
 |             | `d`            | describe the selected pod            |
 | logs        | `f`            | toggle follow (auto-scroll)          |
+|             | `/`, `n`, `N`  | search, next / previous match        |
+|             | `w`            | toggle line wrap                     |
+|             | `t`            | toggle timestamps                    |
+|             | `p`            | previous container instance (`--previous`) |
 |             | `c`            | next container                       |
-|             | `↑↓ pgup pgdn` | scroll (scrolling up pauses follow)  |
+|             | `↑↓ ←→ pgup pgdn` | scroll (scrolling up pauses follow) |
 | describe, yaml | `r`         | refresh                              |
 | yaml        | `←/→`          | scroll horizontally                  |
 

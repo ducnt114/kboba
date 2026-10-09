@@ -90,7 +90,7 @@ func TestClientOnlyReads(t *testing.T) {
 		nextEvent(t, w.Events, Synced)
 		w.Stop()
 	}
-	lines, _, err := c.StreamLogs(ctx, "default", "web", "app")
+	lines, _, err := c.StreamLogs(ctx, "default", "web", "app", LogOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 
 12. [Phase 2.1: Resource views](#12-phase-21-resource-views-deployments-services-events-nodes)
 13. [Phase 2.2: Xem YAML](#13-phase-22-xem-yaml-y)
+14. [Phase 2.3: Logs nâng cao](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -339,7 +340,7 @@ Enter trên pod để xem log bằng `viewport`. `f` bật/tắt follow, `c` đ�
 **Stream log** (`internal/k8s/logs.go` → `StreamLogs`):
 
 ```go
-body, err := c.clientset.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx) // opts: Follow, TailLines=500, Container
+body, err := c.clientset.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx) // opts: Follow, TailLines=500, Container (+ Timestamps, Previous từ phase 2.3)
 go func() {
     defer close(lines)    // chạy SAU CÙNG (defer chạy theo thứ tự ngược)
     defer body.Close()
@@ -521,7 +522,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 |---|---|---|---|
 | 2.1 | View cho Deployments, Services, Events, Nodes | Tạo abstraction sau khi đã có ví dụ thật; generic informer | ✅ [mục 12](#12-phase-21-resource-views-deployments-services-events-nodes) |
 | 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ✅ [mục 13](#13-phase-22-xem-yaml-y) |
-| 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ⏳ |
+| 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ✅ [mục 14](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous) |
 | 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ⏳ |
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ⏳ |
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ⏳ |
@@ -718,4 +719,94 @@ func (v *detailView) openYAML(c k8s.Client, rt *k8s.ResourceType, r k8s.Resource
 | Sửa object trong cache của informer làm hỏng dữ liệu của consumer khác | Luôn `Get` bản mới từ API |
 | Wrap làm hỏng thụt lề YAML | `wrap=false` + cuộn ngang |
 | Viewport mặc định không cuộn ngang | `SetHorizontalStep(4)` |
+
+## 14. Phase 2.3: Logs: tìm kiếm, wrap, timestamps, previous
+
+### Mục tiêu
+Logs view dùng được khi debug thật:
+- `/` để tìm kiếm (không phân biệt hoa thường), highlight kết quả, `n`/`N` để nhảy giữa các kết quả;
+- `w` để bật/tắt wrap dòng dài, ←/→ để cuộn ngang khi không wrap;
+- `t` để bật/tắt timestamps;
+- `p` để xem log của container *trước khi crash* (`kubectl logs --previous`), rất cần cho pod CrashLoopBackOff.
+
+### Học được gì
+- **`PodLogOptions`**: `Timestamps`, `Previous`. Khi `Previous` thì không `Follow`, vì container đó sẽ không bao giờ ghi thêm.
+- **Chỉ số ổn định trên ring buffer:** khi buffer xoay vòng, "dòng thứ i" trỏ sang dòng khác. Cần một số tuyệt đối (`dropped + i`) để ghi nhớ kết quả tìm kiếm đang đứng.
+- **Ánh xạ dòng log sang dòng hiển thị:** khi wrap, một dòng log chiếm nhiều dòng trong viewport. Muốn nhảy đến dòng log thứ i thì cần biết nó *bắt đầu* ở dòng hiển thị nào.
+- **Tách logic thuần khỏi view:** tìm kiếm, highlight và chọn kết quả kế tiếp là các hàm thuần, test được bằng bảng case mà không cần Bubble Tea.
+- **Esc nhiều tầng:** Esc đầu tiên xóa search, Esc tiếp theo mới rời view.
+
+### Thể hiện trong code
+
+**Tùy chọn log** (`internal/k8s/logs.go`): `StreamLogs(ctx, ns, pod, container, opts LogOptions)`. `LogOptions` là struct của kboba, không phải `corev1.PodLogOptions`, nên UI không phụ thuộc vào kiểu của client-go và chỉ lộ ra đúng những gì người dùng được chỉnh:
+
+```go
+opts := &corev1.PodLogOptions{
+    Container:  container,
+    Follow:     !o.Previous,
+    TailLines:  &tail,
+    Timestamps: o.Timestamps,
+    Previous:   o.Previous,
+}
+```
+
+`logsView.opts` lưu lựa chọn hiện tại. `t`/`p` đảo cờ rồi gọi `restart()`, tức là quy trình cancel → `gen++` → stream mới đã có từ phase (d). Đổi container (`c`) giữ nguyên `opts`.
+
+**Số dòng tuyệt đối** (`internal/ui/logbuffer.go`): `ringBuffer.dropped` đếm số dòng đã bị đẩy ra. Dòng thứ `i` trong buffer có số tuyệt đối `dropped + i`, và số này không đổi khi buffer tiếp tục xoay. `matches` và `current` của search lưu số tuyệt đối.
+
+**Logic tìm kiếm thuần** (`internal/ui/logsearch.go`):
+- `containsFold(line, term)`: so khớp không phân biệt hoa thường.
+- `highlightMatches(line, term, style)`: tìm trên `strings.ToLower(line)` rồi cắt `line` gốc theo cùng offset. Nếu `ToLower` làm thay đổi độ dài byte (một vài ký tự Unicode hiếm) thì offset không còn khớp; khi đó chỉ báo match mà không tô màu, thay vì cắt sai chuỗi.
+- `nextMatch(matches, current, from, forward)`: chọn kết quả kế tiếp hoặc trước đó và quay vòng. Nếu chưa có `current` thì bắt đầu từ dòng đang ở đầu màn hình (`from`). Nếu `current` đã bị đẩy khỏi buffer thì chọn kết quả gần nó nhất.
+
+**`render()`** (`internal/ui/logs.go`) chạy một lần cho mỗi batch và làm 4 việc trong một vòng lặp:
+
+```go
+for i := range v.buf.len() {
+    line := strings.ReplaceAll(v.buf.at(i), "\t", "    ")       // tab làm lệch độ rộng
+    if containsFold(line, v.term) {
+        v.matches = append(v.matches, v.buf.dropped+i)          // 1. tìm kết quả (số tuyệt đối)
+        line = highlightMatches(line, v.term, matchStyle)       // 2. tô màu
+    }
+    if v.wrap && v.viewport.Width > 0 {
+        line = ansi.Hardwrap(line, v.viewport.Width, true)      // 3. wrap, hiểu ANSI
+    }
+    v.lineOffsets = append(v.lineOffsets, row)                  // 4. dòng log i bắt đầu ở hàng nào
+    row += strings.Count(line, "\n") + 1
+    ...
+}
+```
+
+- `ansi.Hardwrap` (từ `charmbracelet/x/ansi`) wrap theo độ rộng hiển thị và **không cắt giữa escape code**, nên phần highlight không bị vỡ khi wrap.
+- **Nhảy tới kết quả** (`jump`): `v.viewport.SetYOffset(v.lineOffsets[m - v.buf.dropped])`, rồi tắt follow để log mới không kéo màn hình đi.
+- **Ngược lại** (`topLine`): `sort.SearchInts(lineOffsets, YOffset+1) - 1` cho ra dòng log đang ở đầu màn hình. `lineOffsets` tăng dần nên tìm nhị phân được.
+- Khi wrap, `SetSize` phải `render()` lại vì kết quả wrap phụ thuộc chiều rộng.
+
+**Phím và ô nhập** (`handleKey`, `handleSearchKey`):
+- Khi ô search đang focus, `capturingInput()` trả `true`, nên root đẩy mọi phím vào view (gõ `q` không thoát app). Đây là cơ chế đã có từ phase (e), giờ được dùng lại.
+- Esc khi đang gõ thì hủy search. Esc khi có `term` thì xóa search. Esc khi không có gì thì `goBack`.
+- `n`/`N` chỉ bắt khi có `term`; nếu không có, phím đi tiếp xuống viewport.
+- Help bar chỉ hiện `n`/`N` khi đang có search, chỉ hiện `←/→` khi không wrap, và chỉ hiện `c` khi pod có nhiều container.
+
+**Thanh tiêu đề** hiện trạng thái: `follow:on wrap:off ts:on PREVIOUS lines:812 /error 3/17`.
+
+### Test liên quan
+- `internal/k8s/logs_test.go` → `TestStreamLogsOptions`: đọc `PodLogOptions` mà fake clientset ghi lại (`GenericAction.GetValue()`) để kiểm tra `Follow`/`Timestamps`/`Previous`/`Container`.
+- `internal/ui/logsearch_test.go`: `TestHighlightMatches` (dùng `lipgloss.Style.Transform` để thấy được kết quả mà không cần terminal), `TestContainsFold`, `TestNextMatch` (bảng case: quay vòng, `current` đã bị đẩy ra, ...).
+- `internal/ui/logbuffer_test.go`: `dropped` sau khi buffer xoay vòng.
+- `internal/ui/root_test.go`:
+  - `TestLogsSearch`: gõ `/Error`, các kết quả, `n`/`N` quay vòng, tiêu đề `2/2`, Esc hai tầng;
+  - `TestLogsOptionsRestartStream`: `t`/`p` restart stream với đúng options, stream cũ bị cancel, đổi container giữ nguyên options;
+  - `TestLogsWrap`: dòng 250 ký tự ở width 100 thành 3 hàng, `lineOffsets` đúng.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Index của kết quả tìm kiếm trỏ sai dòng sau khi buffer xoay vòng | Lưu số tuyệt đối `dropped + i` |
+| Wrap làm lệch phép tính "dòng log i ở hàng nào" | `lineOffsets` tính trong cùng vòng lặp với wrap |
+| Wrap thủ công cắt đôi escape code của phần highlight | `ansi.Hardwrap` hiểu ANSI |
+| `ToLower` làm đổi độ dài byte nên offset highlight sai | Phát hiện `len(lower) != len(line)` thì bỏ qua highlight |
+| Tab hiển thị với độ rộng không xác định | Đổi `\t` thành 4 dấu cách khi render |
+| `--previous` với `Follow: true` | `Follow: !Previous` |
+| Gõ `q`/`n` vào ô search bị hiểu thành phím tắt | `capturingInput()` khi ô search đang focus |
 

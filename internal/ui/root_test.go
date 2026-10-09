@@ -25,11 +25,13 @@ type fakeClient struct {
 	others     map[string][]k8s.Resource // non-pod resources by type name
 	watches    []*fakeWatch
 	streams    []*fakeStream
+	logLines   []string // extra lines every stream emits
 }
 
 // fakeStream records a StreamLogs call; ctx tells whether it was cancelled.
 type fakeStream struct {
 	container string
+	opts      k8s.LogOptions
 	ctx       context.Context
 }
 
@@ -101,11 +103,14 @@ func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns string) (*k8s.Resou
 
 // StreamLogs emits two lines, then stays open (like a follow) until ctx
 // is cancelled.
-func (f *fakeClient) StreamLogs(ctx context.Context, _, _, container string) (<-chan string, <-chan error, error) {
-	f.streams = append(f.streams, &fakeStream{container: container, ctx: ctx})
-	lines := make(chan string, 2)
+func (f *fakeClient) StreamLogs(ctx context.Context, _, _, container string, opts k8s.LogOptions) (<-chan string, <-chan error, error) {
+	f.streams = append(f.streams, &fakeStream{container: container, opts: opts, ctx: ctx})
+	lines := make(chan string, len(f.logLines)+2)
 	lines <- container + " line 1"
 	lines <- container + " line 2"
+	for _, l := range f.logLines {
+		lines <- l
+	}
 	go func() {
 		<-ctx.Done()
 		close(lines)
@@ -552,5 +557,101 @@ func TestYAMLForAnyResourceType(t *testing.T) {
 	m = send(t, m, press("esc"))
 	if m.active != viewResources || m.resources.rt != k8s.Deployments {
 		t.Fatalf("esc should return to the deployments table")
+	}
+}
+
+func TestLogsSearch(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	fc.logLines = []string{"ok", "ERROR one", "ok", "fine", "another error", "ok"}
+
+	m = send(t, m, press("enter"))
+	if n := m.logs.buf.len(); n != 8 {
+		t.Fatalf("buffered %d lines, want 8", n)
+	}
+
+	m = send(t, m, press("/"))
+	if !m.logs.capturingInput() {
+		t.Fatal("search input should have focus")
+	}
+	for _, r := range "Error" {
+		m = send(t, m, press(string(r)))
+	}
+	m = send(t, m, press("enter"))
+
+	// Lines 3 and 6 (0-based) contain "error", case-insensitively.
+	if got := m.logs.matches; len(got) != 2 || got[0] != 3 || got[1] != 6 {
+		t.Fatalf("matches = %v", got)
+	}
+	if m.logs.current != 3 || m.logs.follow {
+		t.Fatalf("current=%d follow=%v, want first match and follow off", m.logs.current, m.logs.follow)
+	}
+	m = send(t, m, press("n"))
+	if m.logs.current != 6 {
+		t.Fatalf("after n current = %d", m.logs.current)
+	}
+	m = send(t, m, press("n"))
+	if m.logs.current != 3 {
+		t.Fatalf("n should wrap around, current = %d", m.logs.current)
+	}
+	m = send(t, m, press("N"))
+	if m.logs.current != 6 {
+		t.Fatalf("after N current = %d", m.logs.current)
+	}
+	if !strings.Contains(m.logs.View(), "/error 2/2") {
+		t.Fatalf("title should show the match position:\n%s", m.logs.View())
+	}
+
+	// First esc clears the search, the second leaves the view.
+	m = send(t, m, press("esc"))
+	if m.logs.term != "" || m.active != viewLogs {
+		t.Fatalf("term=%q active=%v", m.logs.term, m.active)
+	}
+	m = send(t, m, press("esc"))
+	if m.active != viewResources {
+		t.Fatalf("active = %v", m.active)
+	}
+}
+
+func TestLogsOptionsRestartStream(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	m = send(t, m, press("enter"))
+	m = send(t, m, press("t"))
+	if len(fc.streams) != 2 || !fc.streams[1].opts.Timestamps {
+		t.Fatalf("t should restart with timestamps: %+v", fc.streams)
+	}
+	if fc.streams[0].ctx.Err() == nil {
+		t.Fatal("old stream not cancelled")
+	}
+	m = send(t, m, press("p"))
+	if last := fc.streams[2].opts; !last.Previous || !last.Timestamps {
+		t.Fatalf("p should keep timestamps and add previous: %+v", last)
+	}
+	// Switching container keeps the options.
+	m = send(t, m, press("c"))
+	if last := fc.streams[3]; last.container != "sidecar" || !last.opts.Previous {
+		t.Fatalf("container switch lost options: %+v", last)
+	}
+	_ = m
+}
+
+func TestLogsWrap(t *testing.T) {
+	m := startModel(t, Options{}) // width 100
+	fc := m.client.(*fakeClient)
+	fc.logLines = []string{strings.Repeat("x", 250), "short"}
+
+	m = send(t, m, press("enter"))
+	if got := m.logs.viewport.TotalLineCount(); got != 4 {
+		t.Fatalf("unwrapped line count = %d, want 4", got)
+	}
+	m = send(t, m, press("w"))
+	// 250 chars at width 100 → 3 rows.
+	if got := m.logs.viewport.TotalLineCount(); got != 6 {
+		t.Fatalf("wrapped line count = %d, want 6", got)
+	}
+	if got := m.logs.lineOffsets; got[3] != 5 {
+		t.Fatalf("line offsets = %v, line 3 should start at row 5", got)
 	}
 }

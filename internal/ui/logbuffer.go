@@ -8,6 +8,9 @@ type ringBuffer struct {
 	lines []string
 	start int // index of the oldest line
 	size  int // number of lines stored
+	// dropped counts lines evicted so far. Line i (0 = oldest kept) has the
+	// absolute number dropped+i, which stays stable while the buffer turns.
+	dropped int
 }
 
 func newRingBuffer(capacity int) ringBuffer {
@@ -25,11 +28,12 @@ func (r *ringBuffer) push(line string) {
 	}
 	r.lines[r.start] = line
 	r.start = (r.start + 1) % len(r.lines)
+	r.dropped++
 }
 
 func (r *ringBuffer) reset() {
 	clear(r.lines)
-	r.start, r.size = 0, 0
+	r.start, r.size, r.dropped = 0, 0, 0
 }
 
 func (r ringBuffer) len() int { return r.size }
