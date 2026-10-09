@@ -24,6 +24,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 13. [Phase 2.2: Xem YAML](#13-phase-22-xem-yaml-y)
 14. [Phase 2.3: Logs nâng cao](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous)
 15. [Phase 2.4: Drill-down và navigation stack](#15-phase-24-drill-down-và-navigation-stack)
+16. [Phase 2.5: Sắp xếp cột](#16-phase-25-sắp-xếp-cột)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -525,7 +526,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ✅ [mục 13](#13-phase-22-xem-yaml-y) |
 | 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ✅ [mục 14](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous) |
 | 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ✅ [mục 15](#15-phase-24-drill-down-và-navigation-stack) |
-| 2.5 | Sắp xếp cột | Logic thuần, dễ test | ⏳ |
+| 2.5 | Sắp xếp cột | Logic thuần, dễ test | ✅ [mục 16](#16-phase-25-sắp-xếp-cột) |
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ⏳ |
 | 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ⏳ |
 | 2.8 | Cột CPU/MEM | So sánh poll và informer | ⏳ |
@@ -892,4 +893,67 @@ type navEntry struct {
 | Quay lại thì con trỏ về dòng 0, vì watch khởi động lại | `pendingSelect` |
 | Esc từ logs nhảy thẳng về bảng gốc | Esc trong logs/detail chỉ về bảng; chỉ Esc *trong bảng* mới pop stack |
 | `:pods` khi đang ở pods đã lọc không làm gì (cùng `rt`) | `showResources` cũng restart khi `len(m.nav) > 0` |
+
+## 16. Phase 2.5: Sắp xếp cột
+
+### Mục tiêu
+Sắp xếp được mọi bảng theo bất kỳ cột nào:
+- `s` để chuyển sang cột kế tiếp (sau cột cuối thì quay về thứ tự mặc định);
+- `S` để đảo chiều;
+- tiêu đề của cột đang sắp xếp có mũi tên `↑`/`↓`.
+
+### Học được gì
+- **Natural sort:** so sánh chuỗi thông thường cho `"10" < "9"` và `"pod-10" < "pod-2"`. Natural sort so sánh các đoạn chữ số như số thật.
+- **Sắp xếp theo giá trị gốc, không theo text hiển thị:** cột AGE hiện `5m`, `3h4m`, nên so sánh text là sai. Phải so sánh `Created`.
+- **Thứ tự ổn định:** dữ liệu từ informer đến liên tục; nếu các dòng bằng nhau không có thứ tự cố định, bảng sẽ "nhảy" mỗi lần có event. Luôn phá thế hòa bằng key.
+- **Định danh cột bằng tiêu đề thay vì index:** index thay đổi khi cột NAMESPACE xuất hiện hoặc biến mất; tiêu đề thì không.
+
+### Thể hiện trong code
+
+**So sánh natural** (`internal/ui/sort.go` → `naturalLess`): duyệt hai chuỗi song song. Khi cả hai đang ở một đoạn chữ số, `splitDigits` tách đoạn đó ra và `compareNumbers` so sánh: bỏ số 0 ở đầu, đoạn nào dài hơn thì lớn hơn, cùng độ dài thì so từng ký tự. Cách này **không chuyển sang `int`**, nên số rất lớn không bị tràn. Ngoài các đoạn số, so sánh từng rune không phân biệt hoa thường. Nhờ vậy:
+- READY `1/3 < 2/3`;
+- RESTARTS `9 < 10`;
+- NAME `web-2 < web-10`.
+
+**Sắp xếp các dòng** (`internal/ui/resources.go`):
+- `setRows` dựng `[]rowEntry{key, res, row}` (dòng đã render cùng `Resource` gốc), rồi gọi `sortEntries(entries, col, byAge, desc)` *trước khi* tách ra `rowKeys` và `rows`. Hai slice này luôn khớp nhau, nên việc tra ngược từ cursor ra object vẫn đúng.
+- `sortEntries`:
+
+  ```go
+  switch {
+  case byAge: less, greater = a.res.Created.After(b.res.Created), ...   // trẻ nhất trước
+  case col >= 0: less, greater = naturalLess(a.row[col], b.row[col]), ...
+  default: less, greater = a.key < b.key, ...                             // namespace rồi name
+  }
+  if !less && !greater { return a.key < b.key }                           // hòa → theo key, kể cả khi đảo chiều
+  if desc { return greater }
+  return less
+  ```
+
+  Khi đảo chiều, chỉ đảo phép so sánh chính; phần phá thế hòa vẫn tăng dần theo key, nên thứ tự luôn xác định.
+
+**Cột sắp xếp lưu bằng tiêu đề** (`sortCol string`):
+- `columns()` trả về `[NAMESPACE] + rt.Columns + AGE`. Chính hàm này được dùng cho cả `setColumns` (header) lẫn `columnTitles()` (tìm vị trí cột), nên hai nơi không thể lệch nhau.
+- `slices.Index(titles, sortCol)` cho ra index; nếu cột không còn tồn tại (ví dụ NAMESPACE sau khi rời "all") thì index là `-1`, tức là thứ tự mặc định.
+- `nextSortColumn` xoay vòng `NAME → … → AGE → "" (mặc định) → NAME`.
+- Đổi loại resource thì reset `sortCol`/`sortDesc`, vì cột của loại khác hoàn toàn khác.
+
+**Header có mũi tên:** `setColumns` nối `↑`/`↓` vào tiêu đề và nới cột cố định nếu cần (`max(width, lipgloss.Width(title))`). Nếu không, bubbles table sẽ cắt tiêu đề thành `RESTARTS…` và mất mũi tên.
+
+### Test liên quan
+- `internal/ui/sort_test.go`:
+  - `TestNaturalLess`: số, `1/3`, phân biệt hoa thường, tiền tố, `007` bằng `7`, số 21 chữ số;
+  - `TestSortEntries`: thứ tự mặc định, cột số, AGE, đảo chiều; thế hòa vẫn theo key khi đảo chiều;
+  - `TestNextSortColumn`: xoay vòng, và cột đã biến mất.
+- `internal/ui/root_test.go` → `TestSortKeys`: `s`/`S`, header `NAME↑`, sắp theo READY, đổi type thì reset.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| `"10" < "9"` khi so sánh chuỗi | `naturalLess` |
+| Sắp AGE theo text `"5m"` | So sánh `Created` |
+| Bảng nhảy dòng mỗi khi informer gửi event | Phá thế hòa bằng key |
+| Index cột thay đổi khi có hoặc mất cột NAMESPACE | Lưu cột bằng tiêu đề |
+| Mũi tên trong header bị cắt | Nới độ rộng cột |
+| Gửi nhiều phím quá nhanh (ví dụ qua `tmux send-keys "s s S"`) bị Bubble Tea gộp thành một `KeyMsg` nhiều rune, nên `key.Matches` không khớp | Không phải lỗi của app: người gõ phím bình thường không gặp. Khi test bằng tmux, gửi từng phím một |
 

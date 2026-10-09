@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ type (
 )
 
 type resourceKeys struct {
-	Up, Down, Logs, Drill, Describe, YAML, Filter key.Binding
+	Up, Down, Logs, Drill, Describe, YAML, Filter, Sort, Reverse key.Binding
 }
 
 var resourceKeyMap = resourceKeys{
@@ -75,6 +76,8 @@ var resourceKeyMap = resourceKeys{
 	Describe: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
 	YAML:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yaml")),
 	Filter:   listKeyMap.Filter,
+	Sort:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort column")),
+	Reverse:  key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "reverse sort")),
 }
 
 // resourcesView is a live table of one resource type (pods, deployments,
@@ -91,6 +94,11 @@ type resourcesView struct {
 	// pendingSelect is a row to put the cursor on once it shows up (after
 	// going back, the restarted watch delivers the rows again).
 	pendingSelect string
+
+	// sortCol is the title of the column rows are sorted by; "" means the
+	// default order (namespace, then name).
+	sortCol  string
+	sortDesc bool
 
 	watch *k8s.ResourceWatch
 	gen   int
@@ -128,7 +136,9 @@ func (v *resourcesView) start(c k8s.Client, q resourceQuery, selectKey string) t
 	v.stop()
 	v.gen++
 	if v.q.rt != q.rt {
-		v.filter.SetValue("") // a pod filter rarely makes sense for nodes
+		// Filter and sort rarely make sense across types (other columns).
+		v.filter.SetValue("")
+		v.sortCol, v.sortDesc = "", false
 	}
 	v.q = q
 	v.pendingSelect = selectKey
@@ -266,6 +276,16 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 			return v, func() tea.Msg { return openDescribeMsg{pod: p} }
 		}
 		return v, nil
+	case key.Matches(msg, resourceKeyMap.Sort):
+		v.sortCol = nextSortColumn(v.columnTitles(), v.sortCol)
+		v.setColumns() // the arrow moves to another header
+		v.refreshRows()
+		return v, nil
+	case key.Matches(msg, resourceKeyMap.Reverse):
+		v.sortDesc = !v.sortDesc
+		v.setColumns()
+		v.refreshRows()
+		return v, nil
 	case key.Matches(msg, resourceKeyMap.YAML):
 		if r, ok := v.selected(); ok {
 			rt := v.q.rt
@@ -297,17 +317,52 @@ func (v resourcesView) showNamespace() bool {
 	return v.q.rt.Namespaced && v.q.namespace == allNamespaces
 }
 
-// setColumns builds the table columns: [NAMESPACE] + the type's own columns
-// + AGE. The flexible column (Width 0) takes the remaining width.
+// columns returns [NAMESPACE] + the type's own columns + AGE.
+func (v resourcesView) columns() []k8s.Column {
+	var cols []k8s.Column
+	if v.showNamespace() {
+		cols = append(cols, k8s.Column{Title: "NAMESPACE", Width: 20})
+	}
+	cols = append(cols, v.q.rt.Columns...)
+	return append(cols, k8s.Column{Title: "AGE", Width: 7})
+}
+
+func (v resourcesView) columnTitles() []string {
+	var titles []string
+	for _, c := range v.columns() {
+		titles = append(titles, c.Title)
+	}
+	return titles
+}
+
+// nextSortColumn cycles through the titles, then back to the default
+// order ("").
+func nextSortColumn(titles []string, current string) string {
+	for i, t := range titles {
+		if t == current {
+			if i+1 < len(titles) {
+				return titles[i+1]
+			}
+			return ""
+		}
+	}
+	return titles[0] // from the default order (or a column that's gone)
+}
+
+// setColumns builds the table columns. The flexible column (Width 0) takes
+// the remaining width; the sorted column gets an arrow.
 func (v *resourcesView) setColumns() {
 	var cols []table.Column
-	if v.showNamespace() {
-		cols = append(cols, table.Column{Title: "NAMESPACE", Width: 20})
+	for _, c := range v.columns() {
+		title := c.Title
+		if title == v.sortCol {
+			title += sortArrow(v.sortDesc)
+			if c.Width > 0 {
+				c.Width = max(c.Width, lipgloss.Width(title)) // don't truncate the arrow away
+			}
+		}
+		cols = append(cols, table.Column{Title: title, Width: c.Width})
 	}
-	for _, c := range v.q.rt.Columns {
-		cols = append(cols, table.Column{Title: c.Title, Width: c.Width})
-	}
-	cols = append(cols, table.Column{Title: "AGE", Width: 7})
 
 	used, flex := 0, -1
 	for i, c := range cols {
@@ -341,29 +396,30 @@ func (v *resourcesView) setRows(selectedKey string) {
 		selectedKey = v.pendingSelect
 	}
 	filter := strings.ToLower(v.filter.Value())
-	keys := make([]string, 0, len(v.items))
-	for k, r := range v.items {
-		if filter == "" || strings.Contains(strings.ToLower(r.Name), filter) {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys) // "namespace/name" sorts by namespace, then name
-
 	now := v.now()
-	rows := make([]table.Row, len(keys))
-	cursor := 0
-	for i, k := range keys {
-		r := v.items[k]
+	var entries []rowEntry
+	for k, r := range v.items {
+		if filter != "" && !strings.Contains(strings.ToLower(r.Name), filter) {
+			continue
+		}
 		row := make(table.Row, 0, len(r.Cells)+2)
 		if v.showNamespace() {
 			row = append(row, r.Namespace)
 		}
 		row = append(row, r.Cells...)
 		row = append(row, formatAge(now.Sub(r.Created)))
-		rows[i] = row
-		if k == selectedKey {
+		entries = append(entries, rowEntry{key: k, res: r, row: row})
+	}
+	sortEntries(entries, slices.Index(v.columnTitles(), v.sortCol), v.sortCol == "AGE", v.sortDesc)
+
+	keys := make([]string, len(entries))
+	rows := make([]table.Row, len(entries))
+	cursor := 0
+	for i, e := range entries {
+		keys[i], rows[i] = e.key, e.row
+		if e.key == selectedKey {
 			cursor = i
-			if k == v.pendingSelect {
+			if e.key == v.pendingSelect {
 				v.pendingSelect = ""
 			}
 		}
@@ -372,6 +428,46 @@ func (v *resourcesView) setRows(selectedKey string) {
 	v.rowKeys = keys
 	v.table.SetRows(rows)
 	v.table.SetCursor(cursor)
+}
+
+// rowEntry is one table row before sorting.
+type rowEntry struct {
+	key string
+	res k8s.Resource
+	row table.Row
+}
+
+// sortEntries orders rows by column col (-1: by key, i.e. namespace then
+// name). byAge compares creation times instead of the rendered "5m" text.
+// Ties always fall back to the key, so the order is stable and doesn't
+// flicker when the informer delivers updates.
+func sortEntries(entries []rowEntry, col int, byAge, desc bool) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		var less, greater bool
+		switch {
+		case byAge: // youngest first, like `ls -t`
+			less, greater = a.res.Created.After(b.res.Created), b.res.Created.After(a.res.Created)
+		case col >= 0:
+			less, greater = naturalLess(a.row[col], b.row[col]), naturalLess(b.row[col], a.row[col])
+		default:
+			less, greater = a.key < b.key, b.key < a.key
+		}
+		if !less && !greater {
+			return a.key < b.key
+		}
+		if desc {
+			return greater
+		}
+		return less
+	})
+}
+
+func sortArrow(desc bool) string {
+	if desc {
+		return "↓"
+	}
+	return "↑"
 }
 
 func (v *resourcesView) SetSize(w, h int) {
@@ -420,7 +516,7 @@ func (v resourcesView) keys() []key.Binding {
 	case k8s.Deployments, k8s.Services:
 		b = append(b, k.Drill)
 	}
-	b = append(b, k.YAML, k.Filter)
+	b = append(b, k.YAML, k.Filter, k.Sort, k.Reverse)
 	if v.filter.Value() != "" {
 		b = append(b, key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear filter")))
 	}

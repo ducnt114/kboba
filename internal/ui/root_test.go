@@ -750,3 +750,30 @@ func TestCommandResetsNavigation(t *testing.T) {
 		t.Fatalf(":pods should show all pods again: nav=%d q=%+v", len(m.nav), m.resources.q)
 	}
 }
+
+func TestSortKeys(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy") // rows: api, legacy, worker
+
+	m = send(t, m, press("s")) // sort by NAME
+	if m.resources.sortCol != "NAME" {
+		t.Fatalf("sortCol = %q", m.resources.sortCol)
+	}
+	if title := m.resources.table.Columns()[0].Title; title != "NAME↑" {
+		t.Fatalf("header = %q", title)
+	}
+	m = send(t, m, press("S"))
+	if got := m.resources.rowKeys; got[0] != "team-a/worker" || got[2] != "team-a/api" {
+		t.Fatalf("reversed rows = %v", got)
+	}
+	m = send(t, m, press("s")) // READY: 1/1, 0/0, 1/1 → descending
+	if got := m.resources.rowKeys; m.resources.sortCol != "READY" || got[2] != "team-a/legacy" {
+		t.Fatalf("by READY desc: col=%q rows=%v", m.resources.sortCol, got)
+	}
+
+	// Another type starts with the default order again.
+	m = typeCommand(t, m, "pods")
+	if m.resources.sortCol != "" || m.resources.sortDesc {
+		t.Fatalf("sort should reset: %q %v", m.resources.sortCol, m.resources.sortDesc)
+	}
+}

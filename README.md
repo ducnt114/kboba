@@ -59,6 +59,7 @@ Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 |             | `q`, `ctrl+c`  | quit                                 |
 | tables      | `/`            | filter by name                       |
 |             | `esc`          | back to the previous table (after drill-down) |
+|             | `s`, `S`       | sort by next column, reverse order   |
 |             | `y`            | YAML of the selected object          |
 | deploy, svc | `enter`        | pods selected by the object (drill-down) |
 | pods        | `enter`        | logs of the selected pod             |
