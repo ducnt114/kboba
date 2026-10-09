@@ -31,9 +31,9 @@ type Client interface {
 	ListPods(ctx context.Context, namespace string) ([]PodInfo, error)
 
 	// WatchResources starts an informer that streams changes of one
-	// resource type in namespace ("" for all). The caller must call Stop on
-	// the returned watch.
-	WatchResources(rt *ResourceType, namespace string) (*ResourceWatch, error)
+	// resource type in namespace ("" for all), optionally filtered by a
+	// label selector. The caller must call Stop on the returned watch.
+	WatchResources(rt *ResourceType, namespace, labelSelector string) (*ResourceWatch, error)
 
 	// GetYAML returns one object as YAML (without managedFields).
 	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)

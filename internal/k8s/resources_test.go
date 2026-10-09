@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // nextEvent waits for the next event of the given type, skipping others.
@@ -33,7 +34,7 @@ func nextEvent(t *testing.T, ch <-chan ResourceEvent, typ ResourceEventType) Res
 func TestWatchResourcesPods(t *testing.T) {
 	c, cs := newFakeClient(t, pod("a", "existing"))
 
-	w, err := c.WatchResources(Pods, "a")
+	w, err := c.WatchResources(Pods, "a", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestWatchResourcesClusterScopedIgnoresNamespace(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}
 	c, _ := newFakeClient(t, node)
 
-	w, err := c.WatchResources(Nodes, "some-namespace")
+	w, err := c.WatchResources(Nodes, "some-namespace", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,5 +224,66 @@ func deploymentFixture() *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "web"},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+}
+
+func TestSelectors(t *testing.T) {
+	d := deploymentFixture()
+	d.Spec.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{"app": "web"},
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: "tier", Operator: metav1.LabelSelectorOpIn, Values: []string{"front", "edge"}},
+		},
+	}
+	if got := deploymentResource(d).Selector; got != "app=web,tier in (edge,front)" {
+		t.Errorf("deployment selector = %q", got)
+	}
+
+	// No selector must stay empty, never "everything".
+	if got := deploymentResource(deploymentFixture()).Selector; got != "" {
+		t.Errorf("nil selector = %q", got)
+	}
+
+	svc := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "web", "tier": "front"}}}
+	if got := serviceResource(svc).Selector; got != "app=web,tier=front" {
+		t.Errorf("service selector = %q", got)
+	}
+	if got := serviceResource(&corev1.Service{}).Selector; got != "" {
+		t.Errorf("selector of a service without selector = %q", got)
+	}
+}
+
+func TestWatchResourcesLabelSelector(t *testing.T) {
+	web := pod("a", "web-1")
+	web.Labels = map[string]string{"app": "web"}
+	other := pod("a", "db-1")
+	other.Labels = map[string]string{"app": "db"}
+	c, cs := newFakeClient(t, web, other)
+
+	w, err := c.WatchResources(Pods, "a", "app=web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	if ev := nextEvent(t, w.Events, Upserted); ev.Resource.Name != "web-1" {
+		t.Fatalf("got %q", ev.Resource.Name)
+	}
+	nextEvent(t, w.Events, Synced) // db-1 was filtered out of the initial list
+
+	// The selector must be sent to the API server on list and watch.
+	for _, a := range cs.Actions() {
+		la, ok := a.(k8stesting.ListAction)
+		if a.GetVerb() == "list" && ok {
+			if got := la.GetListRestrictions().Labels.String(); got != "app=web" {
+				t.Errorf("list selector = %q", got)
+			}
+		}
+		wa, ok := a.(k8stesting.WatchAction)
+		if a.GetVerb() == "watch" && ok {
+			if got := wa.GetWatchRestrictions().Labels.String(); got != "app=web" {
+				t.Errorf("watch selector = %q", got)
+			}
+		}
 	}
 }

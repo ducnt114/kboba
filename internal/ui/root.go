@@ -38,6 +38,13 @@ const (
 	viewDetail
 )
 
+// navEntry is one step of the drill-down history: what the table showed
+// and which row was selected, so going back restores both.
+type navEntry struct {
+	query    resourceQuery
+	selected string
+}
+
 // clientReadyMsg is sent once a client for a (new) context has been created.
 type clientReadyMsg struct {
 	client   k8s.Client
@@ -56,6 +63,11 @@ type Model struct {
 	client    k8s.Client
 	context   string
 	namespace string
+
+	// nav is the drill-down history of the resources view (deployment →
+	// its pods, ...). esc pops it. Explicit navigation (":pods", ":ns",
+	// switching context) starts a fresh history.
+	nav []navEntry
 
 	active     viewID
 	contexts   contextsView
@@ -162,7 +174,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setActive(viewDetail)
 		return m, cmd
 
+	case drillDownMsg:
+		return m.drillDown(msg)
+
 	case backMsg:
+		if m.active == viewResources {
+			return m.popNav()
+		}
 		if m.client != nil {
 			m.setActive(viewResources)
 		}
@@ -308,7 +326,8 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.contexts, cmd = m.contexts.Update(contextsLoadedMsg{contexts: msg.contexts})
 	// start stops the previous context's informer before creating a new one.
-	watchCmd := m.resources.start(m.client, m.resources.rt, m.namespace)
+	m.nav = nil
+	watchCmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: m.namespace}, "")
 	m.setActive(viewResources)
 	return m, tea.Batch(cmd, watchCmd)
 }
@@ -324,7 +343,8 @@ func (m Model) switchNamespace(ns string) (tea.Model, tea.Cmd) {
 	if m.client == nil {
 		return m, nil
 	}
-	cmd := m.resources.start(m.client, m.resources.rt, ns)
+	m.nav = nil
+	cmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: ns}, "")
 	m.setActive(viewResources)
 	return m, cmd
 }
@@ -335,11 +355,35 @@ func (m Model) showResources(rt *k8s.ResourceType) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	if rt != m.resources.rt {
-		cmd = m.resources.start(m.client, rt, m.namespace)
+	if rt != m.resources.q.rt || len(m.nav) > 0 {
+		m.nav = nil
+		cmd = m.resources.start(m.client, resourceQuery{rt: rt, namespace: m.namespace}, "")
 	}
 	m.setActive(viewResources)
 	return m, cmd
+}
+
+// drillDown shows the pods selected by a deployment or service, and
+// remembers the current table so esc can come back to it.
+func (m Model) drillDown(msg drillDownMsg) (tea.Model, tea.Cmd) {
+	m.nav = append(m.nav, navEntry{query: m.resources.q, selected: m.resources.selectedKey()})
+	q := resourceQuery{
+		rt:        k8s.Pods,
+		namespace: msg.resource.Namespace, // even in "all namespaces" mode
+		selector:  msg.resource.Selector,
+		scope:     msg.rt.Name + "/" + msg.resource.Name,
+	}
+	return m, m.resources.start(m.client, q, "")
+}
+
+// popNav goes back one drill-down step, if any.
+func (m Model) popNav() (tea.Model, tea.Cmd) {
+	if len(m.nav) == 0 {
+		return m, nil
+	}
+	last := m.nav[len(m.nav)-1]
+	m.nav = m.nav[:len(m.nav)-1]
+	return m, m.resources.start(m.client, last.query, last.selected)
 }
 
 func (m Model) showNamespaces() (tea.Model, tea.Cmd) {

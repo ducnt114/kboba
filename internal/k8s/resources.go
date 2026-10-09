@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
@@ -33,6 +34,10 @@ type Resource struct {
 	Cells     []string  // one per ResourceType.Columns
 	// Pod is set for pods only; the logs and describe views need it.
 	Pod *PodInfo
+	// Selector is the label selector of the pods this object manages or
+	// targets (deployments, services), e.g. "app=web". Empty means none:
+	// it must never be used to list pods, as it would match all of them.
+	Selector string
 }
 
 // Key uniquely identifies a resource of one type.
@@ -159,20 +164,29 @@ func deploymentResource(d *appsv1.Deployment) Resource {
 		desired = *d.Spec.Replicas
 	}
 	s := d.Status
-	return newResource(d, d.Name,
+	r := newResource(d, d.Name,
 		fmt.Sprintf("%d/%d", s.ReadyReplicas, desired),
 		fmt.Sprint(s.UpdatedReplicas),
 		fmt.Sprint(s.AvailableReplicas),
 	)
+	// matchLabels and matchExpressions → "app=web,tier in (a,b)".
+	if sel, err := metav1.LabelSelectorAsSelector(d.Spec.Selector); err == nil && !sel.Empty() {
+		r.Selector = sel.String()
+	}
+	return r
 }
 
 func serviceResource(s *corev1.Service) Resource {
-	return newResource(s, s.Name,
+	r := newResource(s, s.Name,
 		string(s.Spec.Type),
 		orNone(s.Spec.ClusterIP),
 		serviceExternalIP(s),
 		servicePorts(s.Spec.Ports),
 	)
+	if len(s.Spec.Selector) > 0 {
+		r.Selector = labels.SelectorFromSet(s.Spec.Selector).String()
+	}
+	return r
 }
 
 func serviceExternalIP(s *corev1.Service) string {
@@ -279,10 +293,11 @@ type ResourceWatch struct {
 }
 
 // WatchResources starts an informer for rt in namespace ("" means all
-// namespaces; ignored for cluster-scoped types). The informer first lists
-// the objects (delivered as Upserted events, followed by Synced) and then
+// namespaces; ignored for cluster-scoped types), optionally restricted by a
+// label selector ("" means no restriction). The informer first lists the
+// objects (delivered as Upserted events, followed by Synced) and then
 // watches for changes.
-func (c *client) WatchResources(rt *ResourceType, namespace string) (*ResourceWatch, error) {
+func (c *client) WatchResources(rt *ResourceType, namespace, labelSelector string) (*ResourceWatch, error) {
 	if c.connErr != nil {
 		return nil, c.connErr
 	}
@@ -306,7 +321,11 @@ func (c *client) WatchResources(rt *ResourceType, namespace string) (*ResourceWa
 		}
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0, informers.WithNamespace(namespace))
+	factory := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0,
+		informers.WithNamespace(namespace),
+		// The selector is applied by the API server on both list and watch.
+		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = labelSelector }),
+	)
 	generic, err := factory.ForResource(rt.gvr)
 	if err != nil {
 		return nil, err

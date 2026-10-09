@@ -15,6 +15,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Namespaces**: pick a namespace, or "all namespaces".
 - **Pods, Deployments, Services, Events, Nodes**: live tables driven by
   informers, no polling (NAMESPACE column in all-namespaces mode).
+- **Drill-down**: from a deployment or service to its pods, `esc` to go
+  back to where you were.
 - **Logs**: follow a container's logs, search with highlighting, wrap,
   timestamps, `--previous`, cycle containers.
 - **Describe**: pod status, containers, conditions and related events.
@@ -56,7 +58,9 @@ Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 |             | `esc`          | back / clear filter                  |
 |             | `q`, `ctrl+c`  | quit                                 |
 | tables      | `/`            | filter by name                       |
+|             | `esc`          | back to the previous table (after drill-down) |
 |             | `y`            | YAML of the selected object          |
+| deploy, svc | `enter`        | pods selected by the object (drill-down) |
 | pods        | `enter`        | logs of the selected pod             |
 |             | `d`            | describe the selected pod            |
 | logs        | `f`            | toggle follow (auto-scroll)          |

@@ -83,7 +83,7 @@ func TestClientOnlyReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rt := range ResourceTypes() {
-		w, err := c.WatchResources(rt, "")
+		w, err := c.WatchResources(rt, "", "")
 		if err != nil {
 			t.Fatal(err)
 		}

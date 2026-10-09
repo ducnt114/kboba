@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/ducnt114/kboba/internal/k8s"
 )
@@ -22,6 +23,7 @@ type fakeClient struct {
 	namespaces []string
 	nsErr      error
 	pods       []k8s.PodInfo
+	podLabels  map[string]labels.Set     // by pod name
 	others     map[string][]k8s.Resource // non-pod resources by type name
 	watches    []*fakeWatch
 	streams    []*fakeStream
@@ -40,6 +42,7 @@ type fakeStream struct {
 type fakeWatch struct {
 	rt        *k8s.ResourceType
 	namespace string
+	selector  string
 	stopped   bool
 	*k8s.ResourceWatch
 }
@@ -71,12 +74,18 @@ func (f *fakeClient) GetPod(context.Context, string, string) (*corev1.Pod, error
 	return &corev1.Pod{}, nil
 }
 
-func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns string) (*k8s.ResourceWatch, error) {
+func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns, selector string) (*k8s.ResourceWatch, error) {
+	sel, err := labels.Parse(selector)
+	if err != nil {
+		return nil, err
+	}
 	var items []k8s.Resource
 	if rt == k8s.Pods {
 		pods, _ := f.ListPods(context.Background(), ns)
 		for _, p := range pods {
-			items = append(items, k8s.Resource{Namespace: p.Namespace, Name: p.Name, Cells: make([]string, len(rt.Columns)), Pod: &p})
+			if sel.Matches(f.podLabels[p.Name]) {
+				items = append(items, k8s.Resource{Namespace: p.Namespace, Name: p.Name, Cells: make([]string, len(rt.Columns)), Pod: &p})
+			}
 		}
 	}
 	for _, r := range f.others[rt.Name] {
@@ -91,7 +100,7 @@ func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns string) (*k8s.Resou
 	}
 	ch <- k8s.ResourceEvent{Type: k8s.Synced}
 
-	w := &fakeWatch{rt: rt, namespace: ns}
+	w := &fakeWatch{rt: rt, namespace: ns, selector: selector}
 	var once sync.Once
 	w.ResourceWatch = &k8s.ResourceWatch{
 		Events: ch,
@@ -145,9 +154,18 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 				{Namespace: "team-a", Name: "worker"},
 				{Namespace: "default", Name: "web"},
 			},
+			podLabels: map[string]labels.Set{
+				"api":    {"app": "api"},
+				"worker": {"app": "worker"},
+				"web":    {"app": "web"},
+			},
 			others: map[string][]k8s.Resource{
-				"deployments": {{Namespace: "team-a", Name: "api", Cells: []string{"api", "1/1", "1", "1"}}},
-				"nodes":       {{Name: "node-1", Cells: []string{"node-1", "Ready", "<none>", "v1.33.0"}}},
+				"deployments": {
+					{Namespace: "team-a", Name: "api", Cells: []string{"api", "1/1", "1", "1"}, Selector: "app=api"},
+					{Namespace: "team-a", Name: "legacy", Cells: []string{"legacy", "0/0", "0", "0"}}, // no selector
+					{Namespace: "team-a", Name: "worker", Cells: []string{"worker", "1/1", "1", "1"}, Selector: "app=worker"},
+				},
+				"nodes": {{Name: "node-1", Cells: []string{"node-1", "Ready", "<none>", "v1.33.0"}}},
 			},
 		}, nil
 	}
@@ -341,8 +359,8 @@ func TestPodsWatchStoppedOnContextSwitch(t *testing.T) {
 	if !old.watches[0].stopped {
 		t.Fatal("watch of the previous context was not stopped")
 	}
-	if m.resources.namespace != "default" {
-		t.Fatalf("pods namespace = %q", m.resources.namespace)
+	if m.resources.q.namespace != "default" {
+		t.Fatalf("pods namespace = %q", m.resources.q.namespace)
 	}
 }
 
@@ -489,8 +507,8 @@ func TestSwitchResourceType(t *testing.T) {
 	fc := m.client.(*fakeClient)
 
 	m = typeCommand(t, m, "deploy")
-	if m.resources.rt != k8s.Deployments {
-		t.Fatalf("resource type = %s", m.resources.rt.Name)
+	if m.resources.q.rt != k8s.Deployments {
+		t.Fatalf("resource type = %s", m.resources.q.rt.Name)
 	}
 	if !fc.watches[0].stopped {
 		t.Fatal("pods watch not stopped")
@@ -499,13 +517,13 @@ func TestSwitchResourceType(t *testing.T) {
 	if last.rt != k8s.Deployments || last.namespace != "team-a" {
 		t.Fatalf("new watch = %s in %q", last.rt.Name, last.namespace)
 	}
-	if len(m.resources.rowKeys) != 1 {
+	if len(m.resources.rowKeys) != 3 {
 		t.Fatalf("rows = %v", m.resources.rowKeys)
 	}
-	// enter/d are pod-only actions.
-	m = send(t, m, press("enter"))
+	// d is a pod-only action.
+	m = send(t, m, press("d"))
 	if m.active != viewResources {
-		t.Fatalf("enter on a deployment opened view %v", m.active)
+		t.Fatalf("d on a deployment opened view %v", m.active)
 	}
 
 	// Namespace switches keep the resource type.
@@ -533,8 +551,8 @@ func TestClusterScopedHasNoNamespaceColumn(t *testing.T) {
 func TestUnknownResourceCommand(t *testing.T) {
 	m := startModel(t, Options{})
 	m = typeCommand(t, m, "secrets")
-	if !m.statusIsErr || m.resources.rt != k8s.Pods {
-		t.Fatalf("status=%q rt=%s", m.status, m.resources.rt.Name)
+	if !m.statusIsErr || m.resources.q.rt != k8s.Pods {
+		t.Fatalf("status=%q rt=%s", m.status, m.resources.q.rt.Name)
 	}
 }
 
@@ -555,7 +573,7 @@ func TestYAMLForAnyResourceType(t *testing.T) {
 	}
 
 	m = send(t, m, press("esc"))
-	if m.active != viewResources || m.resources.rt != k8s.Deployments {
+	if m.active != viewResources || m.resources.q.rt != k8s.Deployments {
 		t.Fatalf("esc should return to the deployments table")
 	}
 }
@@ -653,5 +671,82 @@ func TestLogsWrap(t *testing.T) {
 	}
 	if got := m.logs.lineOffsets; got[3] != 5 {
 		t.Fatalf("line offsets = %v, line 3 should start at row 5", got)
+	}
+}
+
+func TestDrillDownAndBack(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	m = typeCommand(t, m, "ns all")
+	m = typeCommand(t, m, "deploy")
+
+	// Select the third row (team-a/worker) and drill into its pods.
+	m = send(t, m, press("j"))
+	m = send(t, m, press("j"))
+	if k := m.resources.selectedKey(); k != "team-a/worker" {
+		t.Fatalf("selected %q", k)
+	}
+	m = send(t, m, press("enter"))
+
+	w := fc.watches[len(fc.watches)-1]
+	if w.rt != k8s.Pods || w.namespace != "team-a" || w.selector != "app=worker" {
+		t.Fatalf("drill-down watch = %s ns=%q sel=%q", w.rt.Name, w.namespace, w.selector)
+	}
+	if len(m.resources.rowKeys) != 1 || m.resources.rowKeys[0] != "team-a/worker" {
+		t.Fatalf("pods = %v", m.resources.rowKeys)
+	}
+	if !strings.Contains(m.resources.View(), "← deployments/worker") {
+		t.Fatal("title should say where the pods come from")
+	}
+	if m.namespace != allNamespaces {
+		t.Fatal("drilling down must not change the app namespace")
+	}
+
+	// Logs and back keep the drill-down.
+	m = send(t, m, press("enter"))
+	m = send(t, m, press("esc"))
+	if m.active != viewResources || m.resources.q.selector != "app=worker" {
+		t.Fatalf("leaving logs lost the drill-down: %+v", m.resources.q)
+	}
+
+	// esc pops back to the deployments, with the same row selected.
+	m = send(t, m, press("esc"))
+	if m.resources.q.rt != k8s.Deployments || m.resources.q.namespace != "" || m.resources.q.selector != "" {
+		t.Fatalf("after esc query = %+v", m.resources.q)
+	}
+	if k := m.resources.selectedKey(); k != "team-a/worker" {
+		t.Fatalf("selection not restored: %q", k)
+	}
+	if len(m.nav) != 0 {
+		t.Fatalf("nav = %+v", m.nav)
+	}
+	// Nothing left to pop: esc does nothing.
+	m = send(t, m, press("esc"))
+	if m.resources.q.rt != k8s.Deployments {
+		t.Fatal("esc at the root of the history changed the view")
+	}
+}
+
+func TestDrillDownNeedsSelector(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("j")) // team-a/legacy has no selector
+	before := len(m.client.(*fakeClient).watches)
+	m = send(t, m, press("enter"))
+	if len(m.client.(*fakeClient).watches) != before || m.resources.q.rt != k8s.Deployments {
+		t.Fatal("drilling into an object without selector must do nothing (it would list every pod)")
+	}
+}
+
+func TestCommandResetsNavigation(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("enter")) // drill into team-a/api
+	if len(m.nav) != 1 {
+		t.Fatalf("nav = %d", len(m.nav))
+	}
+	m = typeCommand(t, m, "pods")
+	if len(m.nav) != 0 || m.resources.q.selector != "" {
+		t.Fatalf(":pods should show all pods again: nav=%d q=%+v", len(m.nav), m.resources.q)
 	}
 }

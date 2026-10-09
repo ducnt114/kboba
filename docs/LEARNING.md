@@ -23,6 +23,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 12. [Phase 2.1: Resource views](#12-phase-21-resource-views-deployments-services-events-nodes)
 13. [Phase 2.2: Xem YAML](#13-phase-22-xem-yaml-y)
 14. [Phase 2.3: Logs nâng cao](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous)
+15. [Phase 2.4: Drill-down và navigation stack](#15-phase-24-drill-down-và-navigation-stack)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -523,7 +524,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.1 | View cho Deployments, Services, Events, Nodes | Tạo abstraction sau khi đã có ví dụ thật; generic informer | ✅ [mục 12](#12-phase-21-resource-views-deployments-services-events-nodes) |
 | 2.2 | Xem YAML (`y`) | Serialize object, highlight cú pháp | ✅ [mục 13](#13-phase-22-xem-yaml-y) |
 | 2.3 | Tìm kiếm trong log, wrap, timestamps, `--previous` | Thao tác trên ring buffer, highlight | ✅ [mục 14](#14-phase-23-logs-tìm-kiếm-wrap-timestamps-previous) |
-| 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ⏳ |
+| 2.4 | Drill-down Deployment → Pods | Navigation stack trong Elm, label selector | ✅ [mục 15](#15-phase-24-drill-down-và-navigation-stack) |
 | 2.5 | Sắp xếp cột | Logic thuần, dễ test | ⏳ |
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ⏳ |
 | 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ⏳ |
@@ -809,4 +810,86 @@ for i := range v.buf.len() {
 | Tab hiển thị với độ rộng không xác định | Đổi `\t` thành 4 dấu cách khi render |
 | `--previous` với `Follow: true` | `Follow: !Previous` |
 | Gõ `q`/`n` vào ô search bị hiểu thành phím tắt | `capturingInput()` khi ô search đang focus |
+
+## 15. Phase 2.4: Drill-down và navigation stack
+
+### Mục tiêu
+Enter trên một Deployment hoặc Service sẽ mở danh sách **pods do nó chọn**. Esc quay lại đúng bảng cũ, với đúng dòng đang chọn trước đó, giống k9s. Từ danh sách pods đó vẫn mở được logs, describe, YAML; Esc từ các view đó quay về danh sách pods đã lọc chứ không về bảng gốc.
+
+### Học được gì
+- **Label selector:** `metav1.LabelSelector` (matchLabels + matchExpressions) được chuyển thành chuỗi `app=web,tier in (edge,front)`. Selector được gửi lên API server để server lọc trên cả list lẫn watch.
+- **Tinh chỉnh informer:** dùng `informers.WithTweakListOptions` để thêm `LabelSelector` vào mọi request của informer.
+- **Navigation stack trong Elm:** lịch sử chỉ là một slice dữ liệu trong model. "Quay lại" nghĩa là lấy entry cuối ra rồi chạy lại đúng query đó.
+- **Gom state thành một giá trị:** những gì bảng đang hiển thị (`resourceQuery`) được gom vào một struct, nên lưu và khôi phục state chỉ là copy một giá trị.
+- **Selector rỗng là nguy hiểm:** selector `""` nghĩa là "khớp tất cả", không phải "không khớp gì".
+
+### Thể hiện trong code
+
+**Selector của object** (`internal/k8s/resources.go`): `Resource.Selector`.
+- Deployment: `metav1.LabelSelectorAsSelector(d.Spec.Selector)`, xử lý được cả `matchExpressions`.
+- Service: `labels.SelectorFromSet(s.Spec.Selector)`.
+- Nếu không có selector thì để chuỗi **rỗng**, và UI sẽ không cho drill-down. Nếu không chặn, một selector rỗng sẽ liệt kê *mọi* pod trong namespace.
+
+**Watch có selector:** `WatchResources(rt, namespace, labelSelector)`:
+
+```go
+factory := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0,
+    informers.WithNamespace(namespace),
+    informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = labelSelector }),
+)
+```
+
+Server lọc giúp ta, nên client chỉ nhận đúng các pod cần thiết, kể cả trong các event watch sau đó.
+
+**Gom query thành struct** (`internal/ui/resources.go`):
+
+```go
+type resourceQuery struct {
+    rt        *k8s.ResourceType
+    namespace string
+    selector  string // "" = không lọc
+    scope     string // "deployments/web", hiện trên tiêu đề
+}
+```
+
+`resourcesView.start(client, q, selectKey)` thay cho `start(client, rt, namespace)`. Mọi chỗ trước đây đọc `v.rt`/`v.namespace` giờ đọc `v.q.rt`/`v.q.namespace`.
+
+**Navigation stack** (`internal/ui/root.go`):
+
+```go
+type navEntry struct {
+    query    resourceQuery // bảng đang hiển thị gì
+    selected string        // dòng nào đang được chọn
+}
+// Model.nav []navEntry
+```
+
+- `drillDown`: đẩy `{m.resources.q, selectedKey}` vào stack, rồi `start` một query pods với `namespace = namespace của deployment` (kể cả khi đang xem all namespaces) và `selector = resource.Selector`.
+- `popNav`: lấy entry cuối ra và `start(entry.query, entry.selected)`.
+- **Esc trong bảng** (không có filter) giờ phát `goBack`. Root nhận `backMsg` khi đang ở `viewResources` thì gọi `popNav`; ở các view khác (logs, detail, contexts, namespaces) thì quay về bảng như trước. Vì vậy từ logs Esc về bảng pods đã lọc, Esc thêm lần nữa mới về deployments.
+- **Điều hướng tường minh sẽ xóa lịch sử:** `:pods`, `:deploy`, `:ns ...`, đổi context đều đặt `m.nav = nil` và bắt đầu query mới không có selector.
+- `m.namespace` (namespace của app, hiện trên header) **không đổi** khi drill-down. Namespace của query nằm riêng trong `resourceQuery`.
+
+**Khôi phục dòng đã chọn** (`pendingSelect`): khi quay lại, watch được khởi động lại nên các dòng đến dần theo event. `start(..., selectKey)` đặt `v.pendingSelect`; `setRows` ưu tiên key này cho tới khi dòng đó xuất hiện, rồi xóa nó. Nếu đã `Synced` mà vẫn không thấy (object đã bị xóa) thì cũng xóa, để con trỏ không nhảy bất ngờ về sau.
+
+**Phím Enter có nghĩa theo loại resource** (`resourcesView.handleKey`, `keys`): với pods là "logs", với deployments/services là "pods", còn với các loại khác thì không làm gì. Help bar hiện đúng nhãn tương ứng.
+
+### Test liên quan
+- `internal/k8s/resources_test.go`:
+  - `TestSelectors`: matchExpressions, service selector, và **selector rỗng phải là chuỗi rỗng**;
+  - `TestWatchResourcesLabelSelector`: danh sách ban đầu đã được lọc; `ListAction.GetListRestrictions()` và `WatchAction.GetWatchRestrictions()` cho thấy selector thực sự được gửi đi.
+- `internal/ui/root_test.go`:
+  - `TestDrillDownAndBack`: drill ở chế độ all namespaces; watch dùng namespace của deployment và đúng selector; tiêu đề có `← deployments/worker`; logs → Esc vẫn giữ bộ lọc; Esc lần nữa về deployments với dòng `worker` được chọn lại; stack rỗng thì Esc không làm gì;
+  - `TestDrillDownNeedsSelector`: object không có selector thì không drill;
+  - `TestCommandResetsNavigation`.
+- Fake client dùng `labels.Parse(selector).Matches(...)` để lọc pod giống API server.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Selector rỗng khớp **mọi** pod | `Selector` để rỗng khi không có selector, và UI chặn drill-down |
+| Drill-down ở all namespaces sẽ lấy pods cùng label ở namespace khác | Query dùng namespace của deployment |
+| Quay lại thì con trỏ về dòng 0, vì watch khởi động lại | `pendingSelect` |
+| Esc từ logs nhảy thẳng về bảng gốc | Esc trong logs/detail chỉ về bảng; chỉ Esc *trong bảng* mới pop stack |
+| `:pods` khi đang ở pods đã lọc không làm gì (cùng `rt`) | `showResources` cũng restart khi `len(m.nav) > 0` |
 
