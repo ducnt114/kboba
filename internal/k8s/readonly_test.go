@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 // must consciously add it here too, and it must be a read.
 var readOnlyMethods = []string{
 	"ListContexts",
+	"ListNamespaces",
 }
 
 func TestClientInterfaceIsReadOnly(t *testing.T) {
@@ -52,6 +54,32 @@ func TestReadOnlyTransportRejectsWrites(t *testing.T) {
 		req, _ := http.NewRequest(method, srv.URL, nil)
 		if _, err := rt.RoundTrip(req); err == nil {
 			t.Errorf("%s should be rejected", method)
+		}
+	}
+}
+
+// TestClientOnlyReads calls every Client method against the fake clientset
+// and checks that the recorded API actions are all get, list or watch.
+func TestClientOnlyReads(t *testing.T) {
+	c, cs := newFakeClient(t, ns("default"))
+	ctx := context.Background()
+
+	if _, err := c.ListContexts(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListNamespaces(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	actions := cs.Actions()
+	if len(actions) == 0 {
+		t.Fatal("expected some API actions to be recorded")
+	}
+	for _, a := range actions {
+		switch a.GetVerb() {
+		case "get", "list", "watch":
+		default:
+			t.Errorf("non-read action: %s %s", a.GetVerb(), a.GetResource().Resource)
 		}
 	}
 }

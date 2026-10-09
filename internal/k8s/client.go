@@ -6,6 +6,7 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -21,6 +22,9 @@ type Client interface {
 	// ListContexts returns all contexts from the kubeconfig. The context this
 	// client is bound to is marked as Current. It never talks to the cluster.
 	ListContexts() ([]ContextInfo, error)
+
+	// ListNamespaces returns the namespace names, sorted.
+	ListNamespaces(ctx context.Context) ([]string, error)
 }
 
 // client is the real Client implementation. It is bound to a single

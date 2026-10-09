@@ -32,6 +32,7 @@ type viewID int
 
 const (
 	viewContexts viewID = iota
+	viewNamespaces
 )
 
 // clientReadyMsg is sent once a client for a (new) context has been created.
@@ -53,8 +54,9 @@ type Model struct {
 	context   string
 	namespace string
 
-	active   viewID
-	contexts contextsView
+	active     viewID
+	contexts   contextsView
+	namespaces namespacesView
 
 	commandMode bool
 	command     textinput.Model
@@ -73,13 +75,14 @@ func New(newClient ClientFactory, opts Options) Model {
 	ti.Placeholder = "ctx | ns | pods | quit"
 
 	return Model{
-		newClient: newClient,
-		opts:      opts,
-		active:    viewContexts,
-		contexts:  newContextsView(),
-		command:   ti,
-		help:      help.New(),
-		status:    "connecting…",
+		newClient:  newClient,
+		opts:       opts,
+		active:     viewContexts,
+		contexts:   newContextsView(),
+		namespaces: newNamespacesView(),
+		command:    ti,
+		help:       help.New(),
+		status:     "connecting…",
 	}
 }
 
@@ -131,12 +134,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contextSelectedMsg:
 		return m.switchContext(msg.name)
 
+	case namespaceSelectedMsg:
+		return m.switchNamespace(msg.namespace)
+
 	case backMsg:
 		return m, nil
 
 	case contextsLoadedMsg:
 		var cmd tea.Cmd
 		m.contexts, cmd = m.contexts.Update(msg)
+		return m, cmd
+
+	case namespacesLoadedMsg:
+		var cmd tea.Cmd
+		m.namespaces, cmd = m.namespaces.Update(msg)
 		return m, cmd
 	}
 
@@ -206,6 +217,14 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 			return m.switchContext(arg)
 		}
 		return m.showContexts()
+	case "ns", "namespace", "namespaces":
+		if arg != "" {
+			if arg == "all" || arg == "-A" {
+				arg = allNamespaces
+			}
+			return m.switchNamespace(arg)
+		}
+		return m.showNamespaces()
 	case "q", "quit":
 		return m, tea.Quit
 	}
@@ -249,6 +268,21 @@ func (m Model) switchContext(name string) (tea.Model, tea.Cmd) {
 	return m, connect(m.newClient, name)
 }
 
+func (m Model) switchNamespace(ns string) (tea.Model, tea.Cmd) {
+	m.namespace = ns
+	m.status, m.statusIsErr = "", false
+	return m, nil
+}
+
+func (m Model) showNamespaces() (tea.Model, tea.Cmd) {
+	m.setActive(viewNamespaces)
+	m.namespaces.current = m.namespace
+	if m.client == nil {
+		return m, nil
+	}
+	return m, loadNamespaces(m.client)
+}
+
 func (m Model) showContexts() (tea.Model, tea.Cmd) {
 	m.setActive(viewContexts)
 	if m.client == nil {
@@ -268,6 +302,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.active {
 	case viewContexts:
 		m.contexts, cmd = m.contexts.Update(msg)
+	case viewNamespaces:
+		m.namespaces, cmd = m.namespaces.Update(msg)
 	}
 	return m, cmd
 }
@@ -276,6 +312,8 @@ func (m Model) activeCapturingInput() bool {
 	switch m.active {
 	case viewContexts:
 		return m.contexts.capturingInput()
+	case viewNamespaces:
+		return m.namespaces.capturingInput()
 	}
 	return false
 }
@@ -284,6 +322,8 @@ func (m Model) activeKeys() helpKeys {
 	switch m.active {
 	case viewContexts:
 		return helpKeys{view: m.contexts.keys()}
+	case viewNamespaces:
+		return helpKeys{view: m.namespaces.keys()}
 	}
 	return helpKeys{}
 }
@@ -297,6 +337,7 @@ func (m *Model) layout() {
 	chrome := 2 + lipgloss.Height(m.help.View(m.activeKeys()))
 	h := max(m.height-chrome, 1)
 	m.contexts.SetSize(m.width, h)
+	m.namespaces.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -308,6 +349,8 @@ func (m Model) View() string {
 	switch m.active {
 	case viewContexts:
 		body = m.contexts.View()
+	case viewNamespaces:
+		body = m.namespaces.View()
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
