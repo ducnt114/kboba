@@ -36,6 +36,9 @@ type Client interface {
 
 	// GetPod returns a single pod.
 	GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error)
+
+	// StreamLogs follows a container's logs until ctx is cancelled.
+	StreamLogs(ctx context.Context, namespace, pod, container string) (<-chan string, <-chan error, error)
 }
 
 // client is the real Client implementation. It is bound to a single

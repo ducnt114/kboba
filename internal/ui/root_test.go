@@ -21,6 +21,13 @@ type fakeClient struct {
 	nsErr      error
 	pods       []k8s.PodInfo
 	watches    []*fakeWatch
+	streams    []*fakeStream
+}
+
+// fakeStream records a StreamLogs call; ctx tells whether it was cancelled.
+type fakeStream struct {
+	container string
+	ctx       context.Context
 }
 
 // fakeWatch is a pod watch whose events are queued up front (initial pods
@@ -76,6 +83,20 @@ func (f *fakeClient) WatchPods(ns string) (*k8s.PodWatch, error) {
 	return w.PodWatch, nil
 }
 
+// StreamLogs emits two lines, then stays open (like a follow) until ctx
+// is cancelled.
+func (f *fakeClient) StreamLogs(ctx context.Context, _, _, container string) (<-chan string, <-chan error, error) {
+	f.streams = append(f.streams, &fakeStream{container: container, ctx: ctx})
+	lines := make(chan string, 2)
+	lines <- container + " line 1"
+	lines <- container + " line 2"
+	go func() {
+		<-ctx.Done()
+		close(lines)
+	}()
+	return lines, make(chan error), nil
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -86,7 +107,7 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 			contexts:   contexts,
 			namespaces: []string{"default", "team-a"},
 			pods: []k8s.PodInfo{
-				{Namespace: "team-a", Name: "api"},
+				{Namespace: "team-a", Name: "api", Containers: []string{"app", "sidecar"}, DefaultContainer: "app"},
 				{Namespace: "team-a", Name: "worker"},
 				{Namespace: "default", Name: "web"},
 			},
@@ -304,5 +325,75 @@ func TestPodsFilter(t *testing.T) {
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if len(m.pods.rowKeys) != 2 {
 		t.Fatalf("esc should clear the filter, rows = %v", m.pods.rowKeys)
+	}
+}
+
+func press(s string) tea.KeyMsg {
+	switch s {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	}
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+func TestLogsLifecycle(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	// The cursor starts on the first row: team-a/api.
+	m = send(t, m, press("enter"))
+	if m.active != viewLogs {
+		t.Fatalf("active view = %v, want logs", m.active)
+	}
+	if len(fc.streams) != 1 || fc.streams[0].container != "app" {
+		t.Fatalf("streams = %+v", fc.streams)
+	}
+	if got := m.logs.buf.String(); got != "app line 1\napp line 2" {
+		t.Fatalf("buffer = %q", got)
+	}
+	if !m.logs.follow {
+		t.Fatal("follow should start on")
+	}
+
+	m = send(t, m, press("f"))
+	if m.logs.follow {
+		t.Fatal("f should turn follow off")
+	}
+
+	// Switching container cancels the first stream and starts a new one.
+	m = send(t, m, press("c"))
+	if fc.streams[0].ctx.Err() == nil {
+		t.Fatal("first stream was not cancelled")
+	}
+	if len(fc.streams) != 2 || fc.streams[1].container != "sidecar" {
+		t.Fatalf("streams = %+v", fc.streams)
+	}
+	if got := m.logs.buf.String(); got != "sidecar line 1\nsidecar line 2" {
+		t.Fatalf("buffer = %q", got)
+	}
+
+	// Leaving the view cancels the stream.
+	m = send(t, m, press("esc"))
+	if m.active != viewPods {
+		t.Fatalf("active view = %v, want pods", m.active)
+	}
+	if fc.streams[1].ctx.Err() == nil {
+		t.Fatal("stream not cancelled when leaving logs view")
+	}
+}
+
+func TestLogsCancelledOnNamespaceSwitch(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	m = send(t, m, press("enter"))
+	m = typeCommand(t, m, "ns default")
+	if m.active != viewPods {
+		t.Fatalf("active view = %v", m.active)
+	}
+	if fc.streams[0].ctx.Err() == nil {
+		t.Fatal("stream not cancelled")
 	}
 }

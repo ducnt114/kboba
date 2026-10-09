@@ -18,6 +18,7 @@ var readOnlyMethods = []string{
 	"ListPods",
 	"WatchPods",
 	"GetPod",
+	"StreamLogs",
 }
 
 func TestClientInterfaceIsReadOnly(t *testing.T) {
@@ -85,6 +86,12 @@ func TestClientOnlyReads(t *testing.T) {
 	}
 	nextEvent(t, w.Events, PodsSynced)
 	w.Stop()
+	lines, _, err := c.StreamLogs(ctx, "default", "web", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range lines {
+	}
 
 	actions := cs.Actions()
 	if len(actions) == 0 {

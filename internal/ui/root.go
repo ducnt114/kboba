@@ -34,6 +34,7 @@ const (
 	viewPods viewID = iota
 	viewContexts
 	viewNamespaces
+	viewLogs
 )
 
 // clientReadyMsg is sent once a client for a (new) context has been created.
@@ -59,6 +60,7 @@ type Model struct {
 	contexts   contextsView
 	namespaces namespacesView
 	pods       podsView
+	logs       logsView
 
 	commandMode bool
 	command     textinput.Model
@@ -84,6 +86,7 @@ func New(newClient ClientFactory, opts Options) Model {
 		contexts:   newContextsView(),
 		namespaces: newNamespacesView(),
 		pods:       newPodsView(),
+		logs:       newLogsView(),
 		command:    ti,
 		help:       help.New(),
 		status:     "connecting…",
@@ -141,6 +144,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case namespaceSelectedMsg:
 		return m.switchNamespace(msg.namespace)
 
+	case openLogsMsg:
+		cmd := m.logs.open(m.client, msg.pod)
+		m.setActive(viewLogs)
+		return m, cmd
+
 	case backMsg:
 		if m.client != nil {
 			m.setActive(viewPods)
@@ -161,6 +169,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case podWatchStartedMsg, podEventsMsg, podWatchClosedMsg, ageTickMsg:
 		var cmd tea.Cmd
 		m.pods, cmd = m.pods.Update(msg)
+		return m, cmd
+
+	case logStreamStartedMsg, logLinesMsg, logStreamEndedMsg:
+		var cmd tea.Cmd
+		m.logs, cmd = m.logs.Update(msg)
 		return m, cmd
 	}
 
@@ -318,6 +331,11 @@ func (m Model) showContexts() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) setActive(v viewID) {
+	// Leaving the logs view must cancel the stream so no goroutine or HTTP
+	// connection is leaked.
+	if m.active == viewLogs && v != viewLogs {
+		m.logs.stop()
+	}
 	m.active = v
 	m.layout()
 }
@@ -332,6 +350,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.namespaces, cmd = m.namespaces.Update(msg)
 	case viewPods:
 		m.pods, cmd = m.pods.Update(msg)
+	case viewLogs:
+		m.logs, cmd = m.logs.Update(msg)
 	}
 	return m, cmd
 }
@@ -344,6 +364,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.namespaces.capturingInput()
 	case viewPods:
 		return m.pods.capturingInput()
+	case viewLogs:
+		return m.logs.capturingInput()
 	}
 	return false
 }
@@ -356,6 +378,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.namespaces.keys()}
 	case viewPods:
 		return helpKeys{view: m.pods.keys()}
+	case viewLogs:
+		return helpKeys{view: m.logs.keys()}
 	}
 	return helpKeys{}
 }
@@ -372,6 +396,7 @@ func (m *Model) layout() {
 	m.contexts.SetSize(m.width, h)
 	m.namespaces.SetSize(m.width, h)
 	m.pods.SetSize(m.width, h)
+	m.logs.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -387,6 +412,8 @@ func (m Model) View() string {
 		body = m.namespaces.View()
 	case viewPods:
 		body = m.pods.View()
+	case viewLogs:
+		body = m.logs.View()
 	}
 
 	// Pin the body height so the status and help bars stay at the bottom.
