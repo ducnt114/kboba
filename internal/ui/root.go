@@ -6,6 +6,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -51,6 +52,21 @@ const (
 	viewLogs
 	viewDetail
 )
+
+// resourceTypeResolvedMsg carries the result of a discovery lookup.
+type resourceTypeResolvedMsg struct {
+	rt  *k8s.ResourceType
+	err error
+}
+
+func resolveResourceType(c k8s.Client, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+		rt, err := c.ResolveResourceType(ctx, name)
+		return resourceTypeResolvedMsg{rt: rt, err: err}
+	}
+}
 
 // navEntry is one step of the drill-down history: what the table showed
 // and which row was selected, so going back restores both.
@@ -197,6 +213,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case drillDownMsg:
 		return m.drillDown(msg)
 
+	case resourceTypeResolvedMsg:
+		if msg.err != nil {
+			return m, reportErr(msg.err)
+		}
+		m.status = ""
+		return m.showResources(msg.rt)
+
 	case backMsg:
 		if m.active == viewResources {
 			return m.popNav()
@@ -314,7 +337,12 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 	if rt, ok := k8s.LookupResourceType(fields[0]); ok {
 		return m.showResources(rt)
 	}
-	return m, reportErr(fmt.Errorf("unknown command %q", fields[0]))
+	// Not a built-in view: ask API discovery (any resource, including CRDs).
+	if m.client == nil {
+		return m, reportErr(fmt.Errorf("unknown command %q", fields[0]))
+	}
+	m.status, m.statusIsErr = fmt.Sprintf("looking up %q…", fields[0]), false
+	return m, resolveResourceType(m.client, fields[0])
 }
 
 func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {

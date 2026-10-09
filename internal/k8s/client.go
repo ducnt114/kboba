@@ -9,8 +9,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -40,6 +43,11 @@ type Client interface {
 	// metrics-server. It must be polled: metrics can't be watched.
 	ListMetrics(ctx context.Context, rt *ResourceType, namespace, labelSelector string) (map[string]Usage, error)
 
+	// ResolveResourceType finds a resource type by name, short name or
+	// kind: first among the built-in views, then through API discovery
+	// (any other resource, including CRDs).
+	ResolveResourceType(ctx context.Context, name string) (*ResourceType, error)
+
 	// GetYAML returns one object as YAML (without managedFields).
 	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
 
@@ -61,6 +69,12 @@ type client struct {
 	contextName string
 	clientset   kubernetes.Interface
 	metrics     metricsclient.Interface
+	dynamic     dynamic.Interface
+
+	// discovered caches ResolveResourceType results, so asking twice for
+	// the same type returns the same *ResourceType.
+	discoveredMu sync.Mutex
+	discovered   map[schema.GroupVersionResource]*ResourceType
 	// connErr is set when the context cannot be used (e.g. it does not exist).
 	// Cluster calls return it, while ListContexts still works so the user can
 	// pick another context.
@@ -116,7 +130,12 @@ func NewClient(kubeconfigPath, contextName string) (Client, error) {
 		c.connErr = fmt.Errorf("context %q: %w", contextName, err)
 		return c, nil
 	}
-	c.clientset, c.metrics = cs, mc
+	dc, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		c.connErr = fmt.Errorf("context %q: %w", contextName, err)
+		return c, nil
+	}
+	c.clientset, c.metrics, c.dynamic = cs, mc, dc
 	return c, nil
 }
 

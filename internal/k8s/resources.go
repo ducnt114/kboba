@@ -14,8 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -58,7 +58,10 @@ type ResourceType struct {
 	kind    string // e.g. "Deployment", for the YAML header
 	gvr     schema.GroupVersionResource
 	convert func(obj any) (Resource, bool)
-	get     func(ctx context.Context, cs kubernetes.Interface, namespace, name string) (runtime.Object, error)
+	get     func(ctx context.Context, c *client, namespace, name string) (runtime.Object, error)
+	// dynamic types come from discovery (ResolveResourceType) and are
+	// watched as unstructured objects through the dynamic client.
+	dynamic bool
 }
 
 var (
@@ -68,8 +71,8 @@ var (
 		kind:    "Pod",
 		gvr:     corev1.SchemeGroupVersion.WithResource("pods"),
 		convert: typed(podResource),
-		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
-			return cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		},
 	}
 	Deployments = &ResourceType{
@@ -78,8 +81,8 @@ var (
 		kind:    "Deployment",
 		gvr:     appsv1.SchemeGroupVersion.WithResource("deployments"),
 		convert: typed(deploymentResource),
-		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
-			return cs.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 		},
 	}
 	Services = &ResourceType{
@@ -88,8 +91,8 @@ var (
 		kind:    "Service",
 		gvr:     corev1.SchemeGroupVersion.WithResource("services"),
 		convert: typed(serviceResource),
-		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
-			return cs.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
 		},
 	}
 	Events = &ResourceType{
@@ -98,8 +101,8 @@ var (
 		kind:    "Event",
 		gvr:     corev1.SchemeGroupVersion.WithResource("events"),
 		convert: typed(eventResource),
-		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
-			return cs.CoreV1().Events(ns).Get(ctx, name, metav1.GetOptions{})
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.CoreV1().Events(ns).Get(ctx, name, metav1.GetOptions{})
 		},
 	}
 	Nodes = &ResourceType{
@@ -108,8 +111,8 @@ var (
 		kind:    "Node",
 		gvr:     corev1.SchemeGroupVersion.WithResource("nodes"),
 		convert: typed(nodeResource),
-		get: func(ctx context.Context, cs kubernetes.Interface, ns, name string) (runtime.Object, error) {
-			return cs.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
 		},
 	}
 )
@@ -268,6 +271,34 @@ func nodeRoles(labels map[string]string) string {
 	return strings.Join(roles, ",")
 }
 
+// informerFactory is what typed and dynamic informer factories share.
+type informerFactory interface {
+	Start(stopCh <-chan struct{})
+	Shutdown()
+}
+
+// newInformer builds an informer for rt: from the typed factory for the
+// built-in types, from the dynamic factory (unstructured objects) for types
+// found by discovery. Everything after this is identical for both.
+func (c *client) newInformer(rt *ResourceType, namespace, labelSelector string) (informerFactory, cache.SharedIndexInformer, error) {
+	// The selector is applied by the API server on both list and watch.
+	tweak := func(o *metav1.ListOptions) { o.LabelSelector = labelSelector }
+
+	if rt.dynamic {
+		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.dynamic, 0, namespace, tweak)
+		return f, f.ForResource(rt.gvr).Informer(), nil
+	}
+	f := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0,
+		informers.WithNamespace(namespace),
+		informers.WithTweakListOptions(tweak),
+	)
+	generic, err := f.ForResource(rt.gvr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, generic.Informer(), nil
+}
+
 // ResourceEventType says what a ResourceEvent means.
 type ResourceEventType int
 
@@ -324,16 +355,10 @@ func (c *client) WatchResources(rt *ResourceType, namespace, labelSelector strin
 		}
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0,
-		informers.WithNamespace(namespace),
-		// The selector is applied by the API server on both list and watch.
-		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = labelSelector }),
-	)
-	generic, err := factory.ForResource(rt.gvr)
+	factory, informer, err := c.newInformer(rt, namespace, labelSelector)
 	if err != nil {
 		return nil, err
 	}
-	informer := generic.Informer()
 
 	// Without this, list/watch errors (e.g. RBAC forbidden) would only be
 	// logged by client-go.

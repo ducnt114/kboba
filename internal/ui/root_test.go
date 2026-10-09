@@ -149,6 +149,23 @@ func (f *fakeClient) ListMetrics(context.Context, *k8s.ResourceType, string, str
 	return f.usage, f.metricsErr
 }
 
+// ResolveResourceType knows the built-in views plus one discovered type,
+// "widgets" (alias "wd").
+func (f *fakeClient) ResolveResourceType(_ context.Context, name string) (*k8s.ResourceType, error) {
+	if rt, ok := k8s.LookupResourceType(name); ok {
+		return rt, nil
+	}
+	if name == "widgets" || name == "wd" {
+		return fakeWidgets, nil
+	}
+	return nil, errors.New("unknown resource type " + name)
+}
+
+var fakeWidgets = &k8s.ResourceType{
+	Name: "widgets", Title: "Widgets", Namespaced: true,
+	Columns: []k8s.Column{{Title: "NAME"}, {Title: "SIZE", Width: 10}},
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -177,7 +194,8 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 					{Namespace: "team-a", Name: "legacy", Cells: []string{"legacy", "0/0", "0", "0"}}, // no selector
 					{Namespace: "team-a", Name: "worker", Cells: []string{"worker", "1/1", "1", "1"}, Selector: "app=worker"},
 				},
-				"nodes": {{Name: "node-1", Cells: []string{"node-1", "Ready", "<none>", "v1.33.0"}}},
+				"nodes":   {{Name: "node-1", Cells: []string{"node-1", "Ready", "<none>", "v1.33.0"}}},
+				"widgets": {{Namespace: "team-a", Name: "w1", Cells: []string{"w1", "3"}}},
 			},
 		}, nil
 	}
@@ -562,7 +580,7 @@ func TestClusterScopedHasNoNamespaceColumn(t *testing.T) {
 
 func TestUnknownResourceCommand(t *testing.T) {
 	m := startModel(t, Options{})
-	m = typeCommand(t, m, "secrets")
+	m = typeCommand(t, m, "nonsense")
 	if !m.statusIsErr || m.resources.q.rt != k8s.Pods {
 		t.Fatalf("status=%q rt=%s", m.status, m.resources.q.rt.Name)
 	}
@@ -923,5 +941,42 @@ func TestStaleMetricsTickStopsPolling(t *testing.T) {
 	m = send(t, m, metricsLoadedMsg{gen: oldGen, usage: map[string]k8s.Usage{"default/web": {CPUMilli: 1}}})
 	if m.resources.metrics["default/web"].CPUMilli == 1 {
 		t.Fatal("stale metrics applied")
+	}
+}
+
+func TestDiscoveredResourceType(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+
+	m = typeCommand(t, m, "wd")
+	if m.resources.q.rt != fakeWidgets {
+		t.Fatalf("type = %s", m.resources.q.rt.Name)
+	}
+	last := fc.watches[len(fc.watches)-1]
+	if last.rt != fakeWidgets || last.namespace != "team-a" {
+		t.Fatalf("watch = %s in %q", last.rt.Name, last.namespace)
+	}
+	if got := m.resources.table.rows; len(got) != 1 || got[0][1] != "3" {
+		t.Fatalf("rows = %v", got)
+	}
+	if !strings.Contains(m.resources.View(), "Widgets(team-a)[1]") {
+		t.Fatalf("title:\n%s", m.resources.View())
+	}
+
+	// y works for discovered types too.
+	m = send(t, m, press("y"))
+	if m.active != viewDetail || !strings.Contains(ansi.Strip(m.detail.text), "kind: widgets") {
+		t.Fatalf("yaml view: active=%v text=%q", m.active, m.detail.text)
+	}
+}
+
+func TestUnknownResourceTypeAfterDiscovery(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "gizmos")
+	if !m.statusIsErr || !strings.Contains(m.status, "unknown resource type gizmos") {
+		t.Fatalf("status = %q", m.status)
+	}
+	if m.resources.q.rt != k8s.Pods {
+		t.Fatal("view should not change")
 	}
 }

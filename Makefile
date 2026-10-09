@@ -35,7 +35,9 @@ kind-up: ## Create the local kind cluster with sample pods and read-only RBAC
 	@kind get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || \
 		kind create cluster --name $(KIND_CLUSTER) --kubeconfig $(ADMIN_KUBECONFIG)
 	@test -f $(ADMIN_KUBECONFIG) || kind export kubeconfig --name $(KIND_CLUSTER) --kubeconfig $(ADMIN_KUBECONFIG)
-	$(KUBECTL) apply -f hack/kind/demo.yaml -f hack/kind/rbac.yaml
+	$(KUBECTL) apply -f hack/kind/crd.yaml
+	$(KUBECTL) wait --for condition=established --timeout=60s crd/widgets.kboba.example.com
+	$(KUBECTL) apply -f hack/kind/demo.yaml -f hack/kind/rbac.yaml -f hack/kind/widgets.yaml
 	@# metrics-server feeds the CPU/MEM columns. kind's kubelets use
 	@# self-signed certificates, hence --kubelet-insecure-tls (local only!).
 	$(KUBECTL) apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/$(METRICS_SERVER_VERSION)/components.yaml

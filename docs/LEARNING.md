@@ -28,6 +28,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 17. [Phase 2.6: Tô màu và table tự viết](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết)
 18. [Phase 2.7: Nhớ namespace của mỗi context](#18-phase-27-nhớ-namespace-của-mỗi-context)
 19. [Phase 2.8: Cột CPU/MEM](#19-phase-28-cột-cpumem-từ-metrics-server)
+20. [Phase 2.9: Mọi resource, kể cả CRD](#20-phase-29-mọi-resource-kể-cả-crd-qua-discovery-và-dynamic-client)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -536,7 +537,7 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.6 | Tô màu theo status | Giới hạn của component có sẵn | ✅ [mục 17](#17-phase-26-tô-màu-theo-trạng-thái-và-table-tự-viết) |
 | 2.7 | Lưu namespace cuối cùng của mỗi context | Lưu state của app riêng | ✅ [mục 18](#18-phase-27-nhớ-namespace-của-mỗi-context) |
 | 2.8 | Cột CPU/MEM | So sánh poll và informer | ✅ [mục 19](#19-phase-28-cột-cpumem-từ-metrics-server) |
-| 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ⏳ |
+| 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ✅ [mục 20](#20-phase-29-mọi-resource-kể-cả-crd-qua-discovery-và-dynamic-client) |
 
 **Không làm:**
 - SelfSubjectAccessReview: là verb `create`, cần bạn quyết định có nới lỏng guard read-only hay không.
@@ -1187,4 +1188,91 @@ case metricsTickMsg:
 | Lỗi metrics bị thông báo khác đè, người dùng không biết vì sao cột trống | `(no metrics)` trên tiêu đề |
 | Trộn đơn vị (`Gi`/`Mi`) làm sắp xếp sai | Luôn dùng `m` và `Mi` |
 | kind không có metrics-server, kubelet dùng chứng chỉ tự ký | Makefile cài metrics-server + `--kubelet-insecure-tls` (chỉ local) |
+
+## 20. Phase 2.9: Mọi resource, kể cả CRD, qua discovery và dynamic client
+
+### Mục tiêu
+`:<bất kỳ loại nào>` đều mở được bảng live: `:cm`, `:ingresses`, `:statefulsets`, `:certificates.cert-manager.io`, `:wd`... Tên có thể là plural, singular, short name, kind hoặc `plural.group`. CRD hiện các cột từ `additionalPrinterColumns` giống `kubectl get`. `y` (YAML) và `/`, `s` (filter, sort) hoạt động với mọi loại.
+
+### Học được gì
+- **Discovery API:** server tự mô tả mình có những resource gì, ở group/version nào, có namespaced không, hỗ trợ verb nào, và short name là gì. `kubectl` cũng dựa vào nó để hiểu `kubectl get wd`.
+- **Dynamic client và `unstructured`:** làm việc với object mà không cần Go type. Object chỉ là `map[string]any`, đọc bằng `unstructured.Nested*`.
+- **Dynamic informer:** `dynamicinformer` cho informer trên bất kỳ GVR nào. Phần còn lại (handler, stop, gen) **không cần đổi gì**, vì cả hai loại factory cùng có `Start`/`Shutdown` và cùng trả về `cache.SharedIndexInformer`.
+- **JSONPath:** cách `kubectl` tính giá trị cho printer columns, ví dụ `.status.conditions[?(@.type=="Ready")].status`.
+- **Đọc CRD bằng chính dynamic client:** CRD cũng là một resource (`customresourcedefinitions.apiextensions.k8s.io`), nên không cần thêm thư viện apiextensions.
+- **Tính an toàn khi chạy song song của thư viện:** `*jsonpath.JSONPath` giữ trạng thái trong lúc `Execute`, nên không dùng chung một instance cho nhiều goroutine được.
+- **Read-only không có nghĩa là hiện mọi thứ:** đọc Secret là thao tác `get` hợp lệ, nhưng TUI thì dễ bị chia sẻ màn hình.
+
+### Thể hiện trong code
+
+**Tìm resource** (`internal/k8s/discovery.go` → `ResolveResourceType`):
+1. `LookupResourceType(name)`: nếu là view có sẵn (pods, deploy, ...) thì dùng luôn.
+2. `discovery.ServerPreferredResources(c.clientset.Discovery())`: lấy mọi resource, mỗi group ở version ưu tiên. Hàm này có thể trả **kết quả một phần kèm lỗi** (ví dụ khi một aggregated API như metrics đang down); kboba chỉ báo lỗi khi không có kết quả nào.
+3. `findResource`: bỏ subresource (`pods/log`) và resource không có cả `list` lẫn `watch` (vì bảng của kboba chạy bằng informer); so khớp với `Name`, `SingularName`, `Kind` (chữ thường), `ShortNames`, và `name.group`.
+4. Nếu GVR trùng với một view có sẵn (ví dụ `deployments.apps`) thì trả về view đó, vì view có sẵn có cột đẹp hơn.
+5. Tạo một `ResourceType` với `dynamic: true`, `get` dùng dynamic client, `convert` dùng `unstructuredResource(columns)`, rồi **cache theo GVR**. Hỏi lại cùng một loại sẽ trả về đúng con trỏ cũ, nên phép so sánh `v.q.rt != q.rt` vẫn có nghĩa.
+
+**Printer columns** (`printerColumns`, `parsePrinterColumns`):
+- GET `customresourcedefinitions/<plural>.<group>` qua dynamic client. Core group thì bỏ qua (không bao giờ là CRD). Lỗi bất kỳ (NotFound vì là resource built-in, hoặc Forbidden) đều chỉ có nghĩa là "không có cột phụ", không làm hỏng view.
+- Lấy `spec.versions[name == version đang dùng].additionalPrinterColumns`; bỏ cột `priority > 0` (chỉ hiện với `-o wide`), bỏ cột `.metadata.creationTimestamp` (kboba đã có AGE), và bỏ JSONPath không parse được.
+- `printerColumn.eval` parse JSONPath **mỗi lần gọi** (`AllowMissingKeys(true)`) rồi `Execute` trên `u.Object`. Parse lại tốn rất ít, còn dùng chung instance thì có data race khi hai informer (cũ đang dừng, mới đang chạy) cùng convert.
+
+**Một hàm watch cho cả hai loại** (`internal/k8s/resources.go` → `newInformer`):
+
+```go
+type informerFactory interface {
+    Start(stopCh <-chan struct{})
+    Shutdown()
+}
+
+if rt.dynamic {
+    f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.dynamic, 0, namespace, tweak)
+    return f, f.ForResource(rt.gvr).Informer(), nil
+}
+f := informers.NewSharedInformerFactoryWithOptions(c.clientset, 0, informers.WithNamespace(namespace), informers.WithTweakListOptions(tweak))
+```
+
+Interface nhỏ `informerFactory` này là thứ duy nhất phải thêm. Mọi thứ khác trong `WatchResources` (handler, tombstone, `SetWatchErrorHandler`, thứ tự dừng) đã có từ phase (c) và được dùng lại nguyên vẹn.
+
+**`get` nhận `*client`** thay vì `kubernetes.Interface`, để getter của type động dùng được `c.dynamic`. `toYAML` không cần đổi: `unstructured` cũng là `runtime.Object`, và `meta.Accessor` dùng được với nó.
+
+**Che Secret** (`internal/k8s/yaml.go` → `redactSecret`): với `v1/secrets`, các giá trị trong `data`/`stringData` được thay bằng `<redacted, N chars>`, và annotation `last-applied-configuration` (chứa giá trị gốc) bị xóa. Key và kích thước vẫn được giữ, để vẫn debug được kiểu "secret có key `password` không".
+
+**UI** (`internal/ui/root.go` → `runCommand`): nếu `LookupResourceType` không thấy thì không báo lỗi ngay, mà chạy `resolveResourceType` trong một Cmd (vì discovery cần gọi mạng), hiện "looking up …", rồi `resourceTypeResolvedMsg` sẽ gọi `showResources(rt)` hoặc báo lỗi. Ngoài phần này, UI không phải sửa gì: bảng, sort, filter, YAML, màu đều dựa trên `ResourceType` và `Resource`, vốn đã generic từ phase 2.1. **Đây là phần thưởng của abstraction ở phase 2.1.**
+
+**kind:** `hack/kind/crd.yaml` (CRD `widgets` có printer columns), `widgets.yaml` (2 instance). Makefile apply CRD, `kubectl wait --for condition=established` (CR phải đợi CRD sẵn sàng), rồi mới apply phần còn lại. ClusterRole read-only thêm CRDs, widgets, configmaps, nhưng **không** có secrets.
+
+### Test liên quan
+- `internal/k8s/discovery_test.go` (dùng `FakeDiscovery.Resources` và `dynamicfake.NewSimpleDynamicClientWithCustomListKinds`):
+  - `TestResolveResourceType`: view có sẵn được ưu tiên (kể cả `deployments.apps`); `widget`/`wd`/`Widget`/`widgets.example.com` trả về **cùng con trỏ**; resource không watch được, subresource và tên lạ đều bị từ chối;
+  - `TestPrinterColumns`: chỉ lấy cột của version đúng; bỏ cột wide, Age và JSONPath hỏng; JSONPath có filter `[?(@.type=="Ready")]`;
+  - `TestDynamicTypeWithoutCRDHasNameOnly`;
+  - `TestWatchDynamicResources`: dynamic informer lọc theo namespace và tính được cell;
+  - `TestGetYAMLDynamicAndSecretRedaction`: YAML của CR; giá trị Secret không lộ, key và annotation khác vẫn còn.
+- `readonly_test.go` → `TestDynamicClientOnlyReads`: action của discovery, dynamic list/watch/get đều là đọc.
+- `internal/ui/root_test.go`: `TestDiscoveredResourceType` (`:wd` → watch, rows, tiêu đề, `y`), `TestUnknownResourceTypeAfterDiscovery`.
+- Thủ công trên envtest: `:wd` có SIZE/COLOR, sort `1 < 10`; `:cm` hiện NAME/AGE; `:secrets` với user read-only bị forbidden, với admin thì YAML đã che giá trị.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| `FakeDiscovery.ServerPreferredResources()` (method) luôn trả về `nil` | Dùng hàm package `discovery.ServerPreferredResources(dc)`, vốn dựng kết quả từ `ServerGroups` và `ServerResourcesForGroupVersion` (fake có hỗ trợ) |
+| Discovery lỗi một phần khi có aggregated API down | Chỉ báo lỗi khi không có kết quả nào |
+| `jsonpath.JSONPath` không an toàn khi chạy song song | Parse mỗi lần `eval` |
+| Mỗi lần resolve tạo `*ResourceType` mới nên phép so sánh con trỏ mất nghĩa | Cache theo GVR trong client (có mutex, vì gọi từ Cmd) |
+| `kubectl apply` CR cùng lúc với CRD thì lỗi "no matches for kind" | `kubectl wait --for condition=established` giữa hai bước |
+| `:secrets` hiện giá trị bí mật trên màn hình | `redactSecret`; ClusterRole demo không cấp quyền đọc secrets |
+| Printer column `Age` trùng với cột AGE của kboba | Bỏ cột `.metadata.creationTimestamp` |
+
+---
+
+## Tổng kết Phase 2
+
+Nhìn lại cả chuỗi phase, có một mạch rõ ràng:
+
+1. **Phase (c)** dựng *một* pattern đúng: informer → channel → Cmd chờ → re-subscribe; generation guard; dừng rồi mới đóng channel.
+2. **Phase 2.1** tách phần thay đổi theo loại resource (cột, cách chuyển object thành row) ra khỏi phần chung. Từ đó trở đi, mỗi tính năng chỉ cần nhắm vào phần chung là áp dụng được cho *mọi* loại: YAML (2.2), drill-down (2.4), sort (2.5), màu (2.6), metrics (2.8).
+3. **Phase 2.9** thêm *vô số* loại resource mà UI gần như không phải sửa gì. Đó là dấu hiệu abstraction đã đặt đúng chỗ.
+
+Một số nguyên tắc xuyên suốt: không block trong `Update`; mọi lời gọi chậm đi qua Cmd; message mang theo "phiên" của nó (gen/id) để bỏ được message cũ; logic thuần tách khỏi view để test bằng bảng case; read-only được khóa ở ba lớp (interface, fake actions, transport).
 

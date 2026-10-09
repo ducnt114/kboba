@@ -8,6 +8,7 @@ import (
 	"sort"
 	"testing"
 
+	"k8s.io/client-go/kubernetes/fake"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
@@ -21,6 +22,7 @@ var readOnlyMethods = []string{
 	"WatchResources",
 	"GetYAML",
 	"ListMetrics",
+	"ResolveResourceType",
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
@@ -69,6 +71,37 @@ func TestReadOnlyTransportRejectsWrites(t *testing.T) {
 
 // TestClientOnlyReads calls every Client method against the fake clientset
 // and checks that the recorded API actions are all get, list or watch.
+// TestDynamicClientOnlyReads does the same for discovery and the dynamic
+// client: resolving a CRD, watching it and reading its YAML.
+func TestDynamicClientOnlyReads(t *testing.T) {
+	c, dc := newFakeDiscoveryClient(t, widgetCRD(), widget("a", "w1", 1, "True"))
+	ctx := context.Background()
+
+	rt, err := c.ResolveResourceType(ctx, "widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := c.WatchResources(rt, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextEvent(t, w.Events, Synced)
+	w.Stop()
+	if _, err := c.GetYAML(ctx, rt, "a", "w1"); err != nil {
+		t.Fatal(err)
+	}
+
+	actions := append(dc.Actions(), c.clientset.(*fake.Clientset).Actions()...)
+	if len(actions) == 0 {
+		t.Fatal("expected some actions")
+	}
+	for _, a := range actions {
+		if v := a.GetVerb(); v != "get" && v != "list" && v != "watch" {
+			t.Errorf("non-read action: %s %s", v, a.GetResource())
+		}
+	}
+}
+
 func TestClientOnlyReads(t *testing.T) {
 	c, cs := newFakeClient(t, ns("default"), pod("default", "web"))
 	ctx := context.Background()

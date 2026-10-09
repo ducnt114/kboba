@@ -19,6 +19,10 @@ phase-by-phase walkthrough of how and why it is built this way.
   15s, since metrics can't be watched; shows `-` without metrics-server).
 - **Colours** by health: failing rows red, pending/not-ready yellow,
   completed grey.
+- **Any resource, including CRDs**: `:<type>` (plural, singular, short name,
+  kind or `plural.group`) is resolved through API discovery and watched with
+  the dynamic client; CRDs show their `additionalPrinterColumns`. Secret
+  values are redacted in the YAML view.
 - **Drill-down**: from a deployment or service to its pods, `esc` to go
   back to where you were.
 - **Logs**: follow a container's logs, search with highlighting, wrap,
@@ -82,7 +86,8 @@ kubeconfig.
 | yaml        | `←/→`          | scroll horizontally                  |
 
 Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:svc`, `:events` (`:ev`),
-`:nodes` (`:no`), `:ctx [name]`, `:ns [name|all]`, `:q`.
+`:nodes` (`:no`), any other resource type (`:cm`, `:ingresses`,
+`:certificates.cert-manager.io`, ...), `:ctx [name]`, `:ns [name|all]`, `:q`.
 
 ## Try it with kind (read-only ServiceAccount)
 
@@ -104,13 +109,15 @@ the `kboba-demo` namespace:
 - `multi`: two containers (`c` switches between them in the logs view)
 - `bad-image`: `ImagePullBackOff`
 - `web`: a Deployment with two replicas and a Service in front of it
+- `widgets.kboba.example.com`: a small CRD with printer columns and two
+  Widgets (try `:wd`)
 
 `make kind-kubeconfig` writes `.kind/readonly.kubeconfig` with three
 contexts:
 
 | Context             | Permissions                                                        |
 |---------------------|--------------------------------------------------------------------|
-| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events, services, nodes, deployments, replicasets; get/list on metrics |
+| `kboba-readonly`    | ClusterRole with get/list/watch on pods, pods/log, namespaces, events, services, nodes, configmaps, deployments, replicasets, CRDs and widgets; get/list on metrics. No secrets. |
 | `kboba-limited`     | Same verbs, only inside `kboba-demo` (try `:ns`, `:ns all`, `:nodes`) |
 | `kboba-unreachable` | Points at a dead endpoint, to see connection errors                |
 

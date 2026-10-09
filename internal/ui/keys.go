@@ -58,6 +58,7 @@ func (h helpKeys) FullHelp() [][]key.Binding {
 			key.NewBinding(key.WithKeys(":svc"), key.WithHelp(":svc", "services")),
 			key.NewBinding(key.WithKeys(":ev"), key.WithHelp(":ev", "events")),
 			key.NewBinding(key.WithKeys(":no"), key.WithHelp(":no", "nodes")),
+			key.NewBinding(key.WithKeys(":<any>"), key.WithHelp(":<type>", "any resource/CRD")),
 		},
 	}
 }
