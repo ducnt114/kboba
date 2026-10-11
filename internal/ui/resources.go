@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -42,6 +43,7 @@ type (
 		gen   int
 		usage map[string]k8s.Usage
 		err   error
+		final bool // don't poll again (e.g. RBAC forbids metrics)
 	}
 	metricsTickMsg struct{ gen int }
 )
@@ -115,6 +117,8 @@ type resourcesView struct {
 
 	watch *k8s.ResourceWatch
 	gen   int
+	// failed is why the watch could not start (e.g. *k8s.ForbiddenError).
+	failed error
 
 	client        k8s.Client // kept to re-poll metrics
 	metrics       map[string]k8s.Usage
@@ -154,26 +158,37 @@ func (v *resourcesView) start(c k8s.Client, q resourceQuery, selectKey string) t
 	v.items = map[string]k8s.Resource{}
 	v.metrics = nil
 	v.metricsFailed = false
+	v.failed = nil
 	v.synced = false
 	v.setColumns()
 	v.refreshRows()
 
 	gen := v.gen
 	watch := func() tea.Msg {
+		// Ask first (SelfSubjectAccessReview): if RBAC says no, say so
+		// clearly and don't start an informer that would retry forever.
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+		if err := k8s.CheckAccess(ctx, c, q.rt.Access("list", q.namespace), q.rt.Access("watch", q.namespace)); err != nil {
+			return watchStartedMsg{gen: gen, err: err}
+		}
 		w, err := c.WatchResources(q.rt, q.namespace, q.selector)
 		return watchStartedMsg{watch: w, gen: gen, err: err}
 	}
-	if !q.rt.Metrics {
-		return watch
-	}
-	return tea.Batch(watch, fetchMetrics(c, q, gen))
+	return watch
 }
 
-// fetchMetrics polls metrics-server once.
-func fetchMetrics(c k8s.Client, q resourceQuery, gen int) tea.Cmd {
+// fetchMetrics polls metrics-server once. The first poll of a query also
+// checks permission: if metrics are forbidden, polling stops for good.
+func fetchMetrics(c k8s.Client, q resourceQuery, gen int, first bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		defer cancel()
+		if first {
+			if err := k8s.CheckAccess(ctx, c, k8s.MetricsAccess(q.rt, q.namespace)); err != nil {
+				return metricsLoadedMsg{gen: gen, err: err, final: true}
+			}
+		}
 		usage, err := c.ListMetrics(ctx, q.rt, q.namespace, q.selector)
 		return metricsLoadedMsg{gen: gen, usage: usage, err: err}
 	}
@@ -215,10 +230,17 @@ func (v resourcesView) Update(msg tea.Msg) (resourcesView, tea.Cmd) {
 			return v, nil
 		}
 		if msg.err != nil {
+			v.failed = msg.err
 			return v, reportErr(msg.err)
 		}
 		v.watch = msg.watch
-		return v, waitForResourceEvents(msg.watch, msg.gen)
+		cmd := waitForResourceEvents(msg.watch, msg.gen)
+		if v.q.rt.Metrics {
+			// Only once the watch is running: if listing the objects is
+			// forbidden, a metrics error would just hide the real one.
+			cmd = tea.Batch(cmd, fetchMetrics(v.client, v.q, v.gen, true))
+		}
+		return v, cmd
 
 	case resourceEventsMsg:
 		if msg.gen != v.gen {
@@ -256,6 +278,9 @@ func (v resourcesView) Update(msg tea.Msg) (resourcesView, tea.Cmd) {
 			return v, nil // the poll loop of a query we left ends here
 		}
 		next := tea.Tick(metricsInterval, func(time.Time) tea.Msg { return metricsTickMsg{gen: msg.gen} })
+		if msg.final {
+			next = nil // polling can't succeed: stop the loop
+		}
 		if msg.err != nil {
 			// Keep polling (metrics-server may come up), but say so once.
 			v.metrics = nil
@@ -275,7 +300,7 @@ func (v resourcesView) Update(msg tea.Msg) (resourcesView, tea.Cmd) {
 		if msg.gen != v.gen {
 			return v, nil
 		}
-		return v, fetchMetrics(v.client, v.q, v.gen)
+		return v, fetchMetrics(v.client, v.q, v.gen, false)
 
 	case tea.KeyMsg:
 		return v.handleKey(msg)
@@ -570,6 +595,13 @@ func (v resourcesView) View() string {
 		title += "  " + v.filter.View()
 	case v.filter.Value() != "":
 		title += statusStyle.Render("  /" + v.filter.Value())
+	case v.failed != nil:
+		var fe *k8s.ForbiddenError
+		if errors.As(v.failed, &fe) {
+			title += statusErrorStyle.Render("  (forbidden)")
+		} else {
+			title += statusErrorStyle.Render("  (error)")
+		}
 	case !v.synced:
 		title += statusStyle.Render("  loading…")
 	}

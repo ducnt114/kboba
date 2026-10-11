@@ -29,6 +29,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 18. [Phase 2.7: Nhớ namespace của mỗi context](#18-phase-27-nhớ-namespace-của-mỗi-context)
 19. [Phase 2.8: Cột CPU/MEM](#19-phase-28-cột-cpumem-từ-metrics-server)
 20. [Phase 2.9: Mọi resource, kể cả CRD](#20-phase-29-mọi-resource-kể-cả-crd-qua-discovery-và-dynamic-client)
+21. [Phase 10: Kiểm tra quyền trước bằng SelfSubjectAccessReview](#21-phase-10-kiểm-tra-quyền-trước-bằng-selfsubjectaccessreview)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -57,6 +58,7 @@ internal/k8s          client-go. KHÔNG import bubbletea
         │
         ▼
    Kubernetes API     chỉ nhận GET (list, watch, get, pods/log)
+                      + POST selfsubjectaccessreviews (phase 10, chỉ để hỏi quyền)
 
 internal/state        (phase 2.7) file state riêng của kboba, ~/.config/kboba/state.yaml.
                       KHÔNG import bubbletea; UI dùng nó qua interface NamespaceMemory
@@ -140,7 +142,7 @@ cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
 
 **Context lỗi không làm chết app:** struct `client` có field `connErr`. Nếu context không tồn tại, `NewClient` vẫn trả về client, kèm `connErr != nil`. Các method gọi cluster trả về `connErr`, còn `ListContexts` vẫn hoạt động, nhờ đó người dùng vẫn chọn được context khác. `NewClient` chỉ trả lỗi khi chính file kubeconfig không đọc được (`main.go` kiểm tra điều này trước khi khởi động TUI).
 
-**Transport chỉ cho GET:** `readOnlyTransport` trong `client.go`, được gắn vào bằng `cfg.Wrap(newReadOnlyTransport)`. Mọi request có method khác `GET`/`HEAD` đều bị từ chối trước khi rời khỏi máy.
+**Transport chỉ cho GET:** `readOnlyTransport` trong `client.go`, được gắn vào bằng `cfg.Wrap(newReadOnlyTransport)`. Mọi request có method khác `GET`/`HEAD` đều bị từ chối trước khi rời khỏi máy. (Từ [phase 10](#21-phase-10-kiểm-tra-quyền-trước-bằng-selfsubjectaccessreview) có đúng một ngoại lệ: `POST .../selfsubjectaccessreviews`.)
 
 **Kết nối không block UI:** `internal/ui/root.go` → `connect()` trả về một `tea.Cmd`. Việc tạo client và đọc kubeconfig chạy trong goroutine, rồi kết quả quay về dưới dạng `clientReadyMsg`. `handleClientReady` xử lý cả hai trường hợp:
 - thành công: cập nhật `m.client`, `m.context`, `m.namespace`;
@@ -471,7 +473,7 @@ Bước 3 là lý do gõ `q` vào ô filter không làm thoát app (`TestQuitKey
 | **Con báo, cha quyết** | View phát message ý định; root đổi state | `contextSelectedMsg`, `namespaceSelectedMsg`, `openLogsMsg`, `openDescribeMsg`, `backMsg` |
 | **Lỗi lên status bar** | View trả về `reportErr(err)`, root hiển thị | `messages.go` → `statusMsg`, `reportErr`, `reportInfo` |
 | **Domain type thay vì API type** | k8s trả `PodInfo` đã format sẵn; UI không cần hiểu `corev1` | `NewPodInfo` |
-| **Read-only 3 lớp** | Allowlist interface + kiểm tra action của fake + transport chỉ GET | `readonly_test.go`, `readOnlyTransport` |
+| **Read-only 3 lớp** | Allowlist interface + kiểm tra action của fake + transport chỉ GET (ngoại lệ duy nhất: tạo SelfSubjectAccessReview, từ phase 10) | `readonly_test.go` (`isRead`, `allowedCreates`), `readOnlyTransport` |
 
 ### Vì sao sub-model dùng value receiver cho `Update`?
 
@@ -539,8 +541,9 @@ Phase 2 được làm theo thứ tự dưới đây, mỗi phase là một commi
 | 2.8 | Cột CPU/MEM | So sánh poll và informer | ✅ [mục 19](#19-phase-28-cột-cpumem-từ-metrics-server) |
 | 2.9 | CRD qua dynamic client | Discovery API, `unstructured` | ✅ [mục 20](#20-phase-29-mọi-resource-kể-cả-crd-qua-discovery-và-dynamic-client) |
 
+| 10 | Kiểm tra quyền trước (SelfSubjectAccessReview) | Authorization API; nới lỏng guard một cách có kiểm soát | ✅ [mục 21](#21-phase-10-kiểm-tra-quyền-trước-bằng-selfsubjectaccessreview) |
+
 **Không làm:**
-- SelfSubjectAccessReview: là verb `create`, cần bạn quyết định có nới lỏng guard read-only hay không.
 - exec, port-forward, edit, delete, scale: vi phạm read-only.
 - Plugin system, theme config: tốn công nhưng học được ít.
 
@@ -1275,4 +1278,95 @@ Nhìn lại cả chuỗi phase, có một mạch rõ ràng:
 3. **Phase 2.9** thêm *vô số* loại resource mà UI gần như không phải sửa gì. Đó là dấu hiệu abstraction đã đặt đúng chỗ.
 
 Một số nguyên tắc xuyên suốt: không block trong `Update`; mọi lời gọi chậm đi qua Cmd; message mang theo "phiên" của nó (gen/id) để bỏ được message cũ; logic thuần tách khỏi view để test bằng bảng case; read-only được khóa ở ba lớp (interface, fake actions, transport).
+
+---
+
+## 21. Phase 10: Kiểm tra quyền trước bằng SelfSubjectAccessReview
+
+### Mục tiêu
+Trước khi watch, xem logs hay poll metrics, kboba hỏi API server "tôi có được phép không?" (giống `kubectl auth can-i`). Nếu câu trả lời là không:
+- tiêu đề hiện `(forbidden)` thay vì `loading…` mãi mãi;
+- status bar nói chính xác hành động bị cấm, ví dụ `forbidden: you cannot list nodes cluster-wide`;
+- **không** khởi động informer, nên không còn cảnh informer retry và báo lỗi liên tục;
+- metrics bị cấm thì dừng hẳn vòng poll.
+
+Để làm được việc này phải **nới lỏng guard read-only** cho đúng một loại request.
+
+### Học được gì
+- **Authorization API:** `SelfSubjectAccessReview` là một resource "ảo". Ta `create` nó với câu hỏi (`verb`, `group`, `resource`, `subresource`, `namespace`); server đánh giá bằng chính danh tính của ta và trả lời trong `status.allowed`. **Không có gì được lưu lại.** Mọi user đã xác thực đều được gọi nó, nhờ ClusterRole mặc định `system:basic-user`.
+- **Nới lỏng một ràng buộc an toàn mà không làm nó mất tác dụng:** ngoại lệ phải hẹp nhất có thể (một method, một path), được viết thành code rõ ràng, và được khóa bằng test cả chiều "được phép" lẫn chiều "vẫn bị chặn".
+- **Fail open và fail closed:** đây chỉ là bước kiểm tra trước để báo lỗi rõ hơn. Nếu bản thân request kiểm tra lỗi (server cũ, mạng chập chờn) thì cứ thử request thật; RBAC trên server vẫn là chốt chặn cuối cùng.
+- **Thứ tự quan trọng với trải nghiệm người dùng:** lỗi phụ (metrics) không được che lỗi chính (không được list object).
+
+### Thể hiện trong code
+
+**Transport** (`internal/k8s/client.go` → `readOnlyTransport.RoundTrip`):
+
+```go
+const accessReviewPath = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+
+switch {
+case req.Method == http.MethodGet || req.Method == http.MethodHead:
+case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, accessReviewPath):
+default:
+    return nil, fmt.Errorf("kboba is read-only: refusing %s %s", ...)
+}
+```
+
+- So khớp bằng **suffix** vì API server có thể nằm sau một path prefix (ví dụ proxy kiểu `/k8s/clusters/c-1/apis/...`). Không có cách khớp lỏng hơn: `subjectaccessreviews` (hỏi quyền cho user *khác*), `selfsubjectrulesreviews`, `PUT`/`DELETE` lên cùng path, hay path dài hơn đều bị từ chối, và từng trường hợp đều có test.
+
+**API kiểm tra quyền** (`internal/k8s/access.go`):
+- `Access{Verb, Group, Resource, Subresource, Namespace}` và `String()` cho ra câu dễ đọc: `list deployments.apps in namespace "team-a"`, `get pods/log ...`, `list nodes cluster-wide`.
+- Các hàm tạo `Access`, để UI không phải biết GVR (vốn là field unexported):
+  - `(*ResourceType).Access(verb, ns)`: tự bỏ namespace khi resource là cluster-scoped;
+  - `LogsAccess(ns)`: `get pods/log`;
+  - `MetricsAccess(rt, ns)`: cùng resource nhưng group `metrics.k8s.io`.
+- `(*client).CanI`: `AuthorizationV1().SelfSubjectAccessReviews().Create(...)` → `Decision{Allowed, Reason}`.
+- `CheckAccess(ctx, client, actions...)`: trả về `*ForbiddenError` cho hành động đầu tiên bị cấm; nếu `CanI` lỗi thì trả về `nil` (fail open). `ForbiddenError` là một kiểu riêng, nên UI dùng `errors.As` để phân biệt "bị cấm" với các lỗi khác.
+
+**Dùng ở UI**, luôn bên trong Cmd (vì là lời gọi mạng):
+- `resourcesView.start` → trước `WatchResources`: `CheckAccess(list, watch)`. Nếu bị cấm thì trả về `watchStartedMsg{err}`, và `v.failed` được đặt, nên tiêu đề hiện `(forbidden)` (hoặc `(error)` với lỗi khác) thay cho `loading…`. `start()` sẽ reset `failed` cho query mới.
+- **Metrics chỉ bắt đầu sau khi watch chạy được** (trong nhánh thành công của `watchStartedMsg`). Trước đây watch và metrics chạy song song; khi cả hai bị cấm, lỗi metrics đến sau và đè mất lỗi chính. Smoke test trên envtest đã phát hiện ra chuyện này.
+- `fetchMetrics(..., first)`: chỉ lần poll đầu tiên của một query mới kiểm tra quyền. Nếu bị cấm thì trả về `metricsLoadedMsg{final: true}`, và handler không lên lịch tick nào nữa. Các lần poll sau không tốn thêm một request SSAR mỗi 15 giây.
+- `logsView.restart` → trước `StreamLogs`: `CheckAccess(LogsAccess(ns))`. Lần kiểm tra dùng một context có timeout riêng, được tạo từ context của stream; nhờ vậy rời view giữa chừng thì lần kiểm tra cũng bị hủy.
+
+**Test read-only được viết lại cho rõ ngoại lệ** (`readonly_test.go`):
+
+```go
+var allowedCreates = map[string]bool{"selfsubjectaccessreviews": true}
+
+func isRead(a k8stesting.Action) bool {
+    switch a.GetVerb() {
+    case "get", "list", "watch": return true
+    case "create":               return allowedCreates[a.GetResource().Resource]
+    }
+    return false
+}
+```
+
+Ngoại lệ chỉ nằm ở **một chỗ**, có tên, có comment giải thích. Ai thêm ngoại lệ thứ hai sẽ phải sửa đúng map này, và reviewer sẽ thấy ngay. `CanI` được thêm vào allowlist method kèm comment giải thích.
+
+### Test liên quan
+- `readonly_test.go`:
+  - `TestReadOnlyTransportRejectsWrites`: POST SSAR được phép (kể cả khi có path prefix); `PUT`/`DELETE` SSAR, `subjectaccessreviews`, `selfsubjectrulesreviews`, path dài hơn, và POST pod đều bị từ chối;
+  - `TestClientOnlyReads`: có ít nhất một `create selfsubjectaccessreviews`, và không có action nào khác ngoài đọc.
+- `access_test.go`:
+  - `TestCanI`: fake API server trả lời theo một danh sách quyền (dùng `PrependReactor`); nodes bỏ namespace; mọi action đều chỉ là `create selfsubjectaccessreviews`;
+  - `TestAccessDescriptions`;
+  - `TestCheckAccess`: cho phép, bị cấm (`errors.As` lấy được `ForbiddenError`), và fail open.
+- `internal/ui/root_test.go`:
+  - `TestForbiddenWatchIsNotStarted`: không có informer nào được tạo; tiêu đề `(forbidden)` không kèm `loading`; đổi namespace được phép thì marker biến mất; nodes bị cấm thì không poll metrics và status giữ đúng lỗi chính;
+  - `TestForbiddenLogs`: không stream log khi bị cấm;
+  - `TestForbiddenMetricsStopsPolling`: không gọi `ListMetrics`, và lỗi `final` không lên lịch tick.
+- Thủ công trên envtest với user `limited-user`: `:nodes` hiện ngay `Nodes[0] (forbidden)` cùng `forbidden: you cannot list nodes cluster-wide`, khớp với `kubectl auth can-i list nodes` → `no`.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Ngoại lệ trong transport khớp quá rộng (ví dụ cho mọi POST tới `authorization.k8s.io`) | Đúng một method, đúng một path (dạng suffix); test cả các trường hợp "gần giống" |
+| Server cũ hoặc lỗi mạng khiến bước kiểm tra lỗi, làm kboba không dùng được | Fail open: `CheckAccess` trả về `nil` khi `CanI` lỗi |
+| Lỗi metrics che lỗi chính khi cả hai bị cấm | Chỉ poll metrics sau khi watch đã chạy |
+| Kiểm tra quyền metrics mỗi 15 giây tốn request | Chỉ kiểm tra ở lần poll đầu tiên của query |
+| Fake clientset mặc định trả `allowed: false` (nó chỉ lưu object) | `PrependReactor("create", "selfsubjectaccessreviews", ...)` để tự trả lời |
+| Tiêu đề kẹt ở `loading…` khi watch không bao giờ bắt đầu | `v.failed` hiện `(forbidden)` / `(error)` |
 

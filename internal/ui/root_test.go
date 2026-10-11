@@ -32,6 +32,7 @@ type fakeClient struct {
 	usage      map[string]k8s.Usage
 	metricsErr error
 	metricCall int
+	denied     map[string]bool // Access.String() values CanI refuses
 }
 
 // fakeStream records a StreamLogs call; ctx tells whether it was cancelled.
@@ -164,6 +165,13 @@ func (f *fakeClient) ResolveResourceType(_ context.Context, name string) (*k8s.R
 var fakeWidgets = &k8s.ResourceType{
 	Name: "widgets", Title: "Widgets", Namespaced: true,
 	Columns: []k8s.Column{{Title: "NAME"}, {Title: "SIZE", Width: 10}},
+}
+
+func (f *fakeClient) CanI(_ context.Context, a k8s.Access) (k8s.Decision, error) {
+	if f.denied[a.String()] {
+		return k8s.Decision{Allowed: false, Reason: "denied by test"}, nil
+	}
+	return k8s.Decision{Allowed: true}, nil
 }
 
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
@@ -978,5 +986,77 @@ func TestUnknownResourceTypeAfterDiscovery(t *testing.T) {
 	}
 	if m.resources.q.rt != k8s.Pods {
 		t.Fatal("view should not change")
+	}
+}
+
+func TestForbiddenWatchIsNotStarted(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	fc.denied = map[string]bool{`list deployments.apps in namespace "team-a"`: true}
+	before := len(fc.watches)
+
+	m = typeCommand(t, m, "deploy")
+	if len(fc.watches) != before {
+		t.Fatal("no informer should be started when RBAC forbids listing")
+	}
+	if !m.statusIsErr || !strings.Contains(m.status, "cannot list deployments.apps") {
+		t.Fatalf("status = %q", m.status)
+	}
+	if v := m.resources.View(); !strings.Contains(v, "(forbidden)") || strings.Contains(v, "loading") {
+		t.Fatalf("title should say forbidden, not loading:\n%s", v)
+	}
+
+	// Allowed again (e.g. in another namespace): the marker goes away.
+	m = typeCommand(t, m, "ns default")
+	if strings.Contains(m.resources.View(), "(forbidden)") {
+		t.Fatal("stale (forbidden) marker")
+	}
+
+	// For a type with metrics, a forbidden watch doesn't poll metrics at
+	// all, so the status keeps the real reason.
+	fc.denied[`list nodes cluster-wide`] = true
+	calls := fc.metricCall
+	m = typeCommand(t, m, "nodes")
+	if fc.metricCall != calls || !strings.Contains(m.status, "cannot list nodes cluster-wide") {
+		t.Fatalf("metrics polled=%v status=%q", fc.metricCall != calls, m.status)
+	}
+}
+
+func TestForbiddenLogs(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	fc.denied = map[string]bool{`get pods/log in namespace "team-a"`: true}
+
+	m = send(t, m, press("enter"))
+	if len(fc.streams) != 0 {
+		t.Fatal("logs must not be streamed when forbidden")
+	}
+	if !strings.Contains(m.status, "cannot get pods/log") || !m.logs.ended {
+		t.Fatalf("status=%q ended=%v", m.status, m.logs.ended)
+	}
+}
+
+func TestForbiddenMetricsStopsPolling(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	fc.denied = map[string]bool{`list pods.metrics.k8s.io in namespace "default"`: true}
+	calls := fc.metricCall
+
+	m = typeCommand(t, m, "ns default")
+	if fc.metricCall != calls {
+		t.Fatal("ListMetrics should not be called when forbidden")
+	}
+	if !strings.Contains(m.resources.View(), "(no metrics)") {
+		t.Fatal("title should say there are no metrics")
+	}
+	// The final failure scheduled no further tick.
+	next, cmd := m.Update(metricsLoadedMsg{gen: m.resources.gen, err: errors.New("x"), final: true})
+	m = next.(Model)
+	if cmd != nil {
+		for _, msg := range runCmd(cmd) {
+			if _, ok := msg.(metricsTickMsg); ok {
+				t.Fatal("a final failure must not schedule another poll")
+			}
+		}
 	}
 }

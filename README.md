@@ -35,15 +35,25 @@ phase-by-phase walkthrough of how and why it is built this way.
 
 ## Read-only by design
 
-kboba only issues `get`, `list` and `watch` requests:
+kboba only issues `get`, `list` and `watch` requests, with one deliberate
+exception: it creates **SelfSubjectAccessReviews** (`kubectl auth can-i`) to
+check permissions before watching, streaming logs or polling metrics. An
+access review is a question to the API server ("may I list pods here?"); the
+server answers and stores nothing.
 
-- The `k8s.Client` interface only has read methods, and a test
+- The `k8s.Client` interface only has read methods plus `CanI`, and a test
   (`TestClientInterfaceIsReadOnly`) fails if a method is added without being
   reviewed.
 - `TestClientOnlyReads` runs every method against client-go's fake clientset
-  and checks that every recorded action is a `get`, `list` or `watch`.
-- As defence in depth, the HTTP transport refuses any method other than
-  `GET`/`HEAD` (watches and log streaming are `GET` too).
+  and checks that every recorded action is a `get`, `list` or `watch`, or a
+  `create` of `selfsubjectaccessreviews` — nothing else.
+- As defence in depth, the HTTP transport refuses every method other than
+  `GET`/`HEAD` (watches and log streaming are `GET` too), except `POST` to
+  exactly `/apis/authorization.k8s.io/v1/selfsubjectaccessreviews`.
+
+When RBAC forbids something, kboba says so up front (`(forbidden)` in the
+title, the exact verb/resource/namespace in the status bar) instead of
+starting an informer that would retry forever.
 
 ## Install / run
 

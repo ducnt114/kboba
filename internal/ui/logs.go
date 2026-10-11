@@ -129,6 +129,12 @@ func (v *logsView) restart() tea.Cmd {
 
 	c, pod, container, opts, gen := v.client, v.pod, v.container, v.opts, v.gen
 	return func() tea.Msg {
+		checkCtx, cancelCheck := context.WithTimeout(ctx, requestTimeout)
+		err := k8s.CheckAccess(checkCtx, c, k8s.LogsAccess(pod.Namespace))
+		cancelCheck()
+		if err != nil {
+			return logStreamStartedMsg{gen: gen, err: err}
+		}
 		lines, errs, err := c.StreamLogs(ctx, pod.Namespace, pod.Name, container, opts)
 		return logStreamStartedMsg{lines: lines, errs: errs, gen: gen, err: err}
 	}

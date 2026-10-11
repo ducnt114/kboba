@@ -9,13 +9,16 @@ import (
 	"testing"
 
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
 // readOnlyMethods is the exhaustive allowlist of Client methods. Every one of
-// them must only perform get/list/watch. If you add a method to Client, you
-// must consciously add it here too, and it must be a read.
+// them must only perform get/list/watch — except CanI, which creates a
+// SelfSubjectAccessReview (see allowedCreates). If you add a method to
+// Client, you must consciously add it here too, and it must be a read.
 var readOnlyMethods = []string{
+	"CanI",
 	"ListContexts",
 	"ListNamespaces",
 	"ListPods",
@@ -45,6 +48,21 @@ func TestClientInterfaceIsReadOnly(t *testing.T) {
 	}
 }
 
+// allowedCreates is the one write-shaped request kboba may send. A
+// SelfSubjectAccessReview asks the API server "may I?" and is not stored.
+var allowedCreates = map[string]bool{"selfsubjectaccessreviews": true}
+
+// isRead reports whether an action recorded by a fake clientset is allowed.
+func isRead(a k8stesting.Action) bool {
+	switch a.GetVerb() {
+	case "get", "list", "watch":
+		return true
+	case "create":
+		return allowedCreates[a.GetResource().Resource]
+	}
+	return false
+}
+
 func TestReadOnlyTransportRejectsWrites(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
@@ -65,6 +83,32 @@ func TestReadOnlyTransportRejectsWrites(t *testing.T) {
 		req, _ := http.NewRequest(method, srv.URL, nil)
 		if _, err := rt.RoundTrip(req); err == nil {
 			t.Errorf("%s should be rejected", method)
+		}
+	}
+
+	// The single exception: POST a SelfSubjectAccessReview, also when the
+	// API server is served under a path prefix.
+	for _, path := range []string{accessReviewPath, "/k8s/clusters/c-1" + accessReviewPath} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, nil)
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Errorf("POST %s should be allowed: %v", path, err)
+			continue
+		}
+		resp.Body.Close()
+	}
+	// …and nothing near it.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPut, accessReviewPath},
+		{http.MethodDelete, accessReviewPath},
+		{http.MethodPost, "/apis/authorization.k8s.io/v1/subjectaccessreviews"}, // about other users
+		{http.MethodPost, "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"},
+		{http.MethodPost, accessReviewPath + "/x"},
+		{http.MethodPost, "/api/v1/namespaces/default/pods"},
+	} {
+		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, nil)
+		if _, err := rt.RoundTrip(req); err == nil {
+			t.Errorf("%s %s should be rejected", tc.method, tc.path)
 		}
 	}
 }
@@ -96,8 +140,8 @@ func TestDynamicClientOnlyReads(t *testing.T) {
 		t.Fatal("expected some actions")
 	}
 	for _, a := range actions {
-		if v := a.GetVerb(); v != "get" && v != "list" && v != "watch" {
-			t.Errorf("non-read action: %s %s", v, a.GetResource())
+		if !isRead(a) {
+			t.Errorf("non-read action: %s %s", a.GetVerb(), a.GetResource())
 		}
 	}
 }
@@ -141,20 +185,27 @@ func TestClientOnlyReads(t *testing.T) {
 		_, _ = c.ListMetrics(ctx, rt, "default", "")
 	}
 	for _, a := range c.metrics.(*metricsfake.Clientset).Actions() {
-		if v := a.GetVerb(); v != "get" && v != "list" && v != "watch" {
-			t.Errorf("non-read metrics action: %s %s", v, a.GetResource().Resource)
+		if !isRead(a) {
+			t.Errorf("non-read metrics action: %s %s", a.GetVerb(), a.GetResource().Resource)
 		}
+	}
+
+	if _, err := c.CanI(ctx, Pods.Access("list", "default")); err != nil {
+		t.Fatal(err)
 	}
 
 	actions := cs.Actions()
 	if len(actions) == 0 {
 		t.Fatal("expected some API actions to be recorded")
 	}
+	sawReview := false
 	for _, a := range actions {
-		switch a.GetVerb() {
-		case "get", "list", "watch":
-		default:
+		if !isRead(a) {
 			t.Errorf("non-read action: %s %s", a.GetVerb(), a.GetResource().Resource)
 		}
+		sawReview = sawReview || a.GetVerb() == "create"
+	}
+	if !sawReview {
+		t.Error("CanI should have created a SelfSubjectAccessReview")
 	}
 }

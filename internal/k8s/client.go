@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +48,11 @@ type Client interface {
 	// kind: first among the built-in views, then through API discovery
 	// (any other resource, including CRDs).
 	ResolveResourceType(ctx context.Context, name string) (*ResourceType, error)
+
+	// CanI asks the API server whether the current user may perform an
+	// action (a SelfSubjectAccessReview). It is the one method that sends a
+	// POST — see readOnlyTransport — but it changes nothing on the cluster.
+	CanI(ctx context.Context, a Access) (Decision, error)
 
 	// GetYAML returns one object as YAML (without managedFields).
 	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
@@ -141,6 +147,10 @@ func NewClient(kubeconfigPath, contextName string) (Client, error) {
 
 // readOnlyTransport is a defence-in-depth guard: it refuses any HTTP request
 // that could modify the cluster. Reads, watches and log streaming are all GET.
+//
+// There is exactly one exception: creating a SelfSubjectAccessReview. It is a
+// POST, but it only asks the API server "may I do X?" — the server answers
+// and stores nothing.
 type readOnlyTransport struct {
 	next http.RoundTripper
 }
@@ -149,8 +159,15 @@ func newReadOnlyTransport(next http.RoundTripper) http.RoundTripper {
 	return &readOnlyTransport{next: next}
 }
 
+// accessReviewPath is the only path kboba may POST to. Matched as a suffix
+// because some API servers live under a path prefix (e.g. behind a proxy).
+const accessReviewPath = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+
 func (t *readOnlyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+	switch {
+	case req.Method == http.MethodGet || req.Method == http.MethodHead:
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, accessReviewPath):
+	default:
 		return nil, fmt.Errorf("kboba is read-only: refusing %s %s", req.Method, req.URL.Path)
 	}
 	return t.next.RoundTrip(req)
