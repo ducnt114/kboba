@@ -70,6 +70,10 @@ type Client interface {
 	// DescribePod returns a human-readable description of a pod and its
 	// events, similar to `kubectl describe pod`.
 	DescribePod(ctx context.Context, namespace, name string) (string, error)
+
+	// Describe describes any object (metadata, owners, conditions, events);
+	// for pods it is DescribePod.
+	Describe(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
 }
 
 // client is the real Client implementation. It is bound to a single

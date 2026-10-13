@@ -219,9 +219,8 @@ func (v treeView) Update(msg tea.Msg) (treeView, tea.Cmd) {
 		case key.Matches(msg, resourceKeyMap.Logs) && n.Type == k8s.Pods && n.Resource.Pod != nil:
 			p := *n.Resource.Pod
 			return v, func() tea.Msg { return openLogsMsg{pod: p} }
-		case key.Matches(msg, resourceKeyMap.Describe) && n.Type == k8s.Pods && n.Resource.Pod != nil:
-			p := *n.Resource.Pod
-			return v, func() tea.Msg { return openDescribeMsg{pod: p} }
+		case key.Matches(msg, resourceKeyMap.Describe):
+			return v, func() tea.Msg { return openDescribeMsg{rt: n.Type, resource: n.Resource} }
 		case key.Matches(msg, resourceKeyMap.YAML):
 			return v, func() tea.Msg { return openYAMLMsg{rt: n.Type, resource: n.Resource} }
 		case key.Matches(msg, resourceKeyMap.AllLogs) && n.Resource.Selector != "":
@@ -285,8 +284,9 @@ func (v treeView) keys() []key.Binding {
 	b := []key.Binding{k.Up, k.Down}
 	if n, ok := v.selected(); ok {
 		if n.Type == k8s.Pods {
-			b = append(b, k.Logs, k.Describe)
+			b = append(b, k.Logs)
 		}
+		b = append(b, k.Describe)
 		if n.Resource.Selector != "" {
 			b = append(b, k.AllLogs)
 		}

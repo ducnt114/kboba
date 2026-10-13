@@ -32,7 +32,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Aggregated logs**: `l` on a deployment or service (or a drilled-down pods
   table) follows every selected pod, prefixed and coloured per pod, like
   `stern`; pods joining or leaving (rollouts) are picked up live.
-- **Describe**: pod status, containers, conditions and related events.
+- **Describe** any object (`d`): metadata, owners, `status.conditions` and
+  its events (matched by UID); pods also get containers and restarts.
 - **YAML**: any object as syntax-highlighted YAML (without managedFields).
 - Filter by name with `/`, k9s-style `:` commands, `?` for help.
 - Errors (connection refused, RBAC forbidden, deleted pods, unknown
@@ -90,8 +91,8 @@ kubeconfig.
 |             | `x`            | ownership tree of the selected object |
 | deploy, svc | `enter`        | pods selected by the object (drill-down) |
 |             | `l`            | logs of all selected pods            |
+|             | `d`            | describe the selected object         |
 | pods        | `enter`        | logs of the selected pod             |
-|             | `d`            | describe the selected pod            |
 | logs        | `f`            | toggle follow (auto-scroll)          |
 |             | `/`, `n`, `N`  | search, next / previous match        |
 |             | `w`            | toggle line wrap                     |

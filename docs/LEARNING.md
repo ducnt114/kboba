@@ -35,6 +35,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 
 22. [Phase 3.1: Logs gộp của nhiều pod](#22-phase-31-logs-gộp-của-nhiều-pod)
 23. [Phase 3.2: Cây quan hệ ownerReferences](#23-phase-32-cây-quan-hệ-ownerreferences)
+24. [Phase 3.3: Describe cho mọi object](#24-phase-33-describe-cho-mọi-object)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -1383,7 +1384,7 @@ Ngoại lệ chỉ nằm ở **một chỗ**, có tên, có comment giải thíc
 |---|---|---|---|
 | 3.1 | Logs gộp của nhiều pod (giống `stern`) | Gộp channel (fan-in), quản lý nhiều stream có vòng đời riêng | ✅ [mục 22](#22-phase-31-logs-gộp-của-nhiều-pod) |
 | 3.2 | Cây quan hệ ownerReferences | Dựng đồ thị từ nhiều danh sách, render dạng cây | ✅ [mục 23](#23-phase-32-cây-quan-hệ-ownerreferences) |
-| 3.3 | Describe generic + events cho mọi object | `unstructured` từ typed object, field selector theo UID | ⏳ |
+| 3.3 | Describe generic + events cho mọi object | `unstructured` từ typed object, field selector theo UID | ✅ [mục 24](#24-phase-33-describe-cho-mọi-object) |
 | 3.4 | Gợi ý và lịch sử cho lệnh `:` | Suggestions của bubbles `textinput`, lưu lịch sử | ⏳ |
 
 ## 22. Phase 3.1: Logs gộp của nhiều pod
@@ -1561,4 +1562,68 @@ Ràng buộc `PT interface{ *T; runtime.Object }` nghĩa là "PT là `*T`, và `
 | Esc từ logs mở từ cây lại nhảy về bảng | `returnTo` |
 | Fake client bỏ sót `Owners` cho pod từ watch, nên test cây ngược thất bại | Dùng một helper `podResource` chung cho watch và list trong fake |
 | Binary cũ khi smoke test làm tưởng tính năng không chạy | Luôn `go build` lại trước khi test thủ công |
+
+## 24. Phase 3.3: Describe cho mọi object
+
+### Mục tiêu
+`d` hoạt động trên mọi dòng của mọi bảng và của cây: deployment, service, node, ReplicaSet, configmap, CRD… Kết quả gồm:
+- metadata: tên, namespace, kind, API version, thời điểm tạo, labels, annotations;
+- owner ("Controlled By");
+- **conditions** (`status.conditions`);
+- **events của chính object đó**.
+
+Pod vẫn dùng bản describe chi tiết (containers, state, restarts) như trước.
+
+### Học được gì
+- **Đọc generic qua `unstructured`:** `runtime.DefaultUnstructuredConverter.ToUnstructured(obj)` biến *bất kỳ* typed object nào thành `map[string]any`. Nhờ đó một hàm duy nhất đọc được `status.conditions` của Deployment, Node hay CRD. Đây là lý do quy ước API của Kubernetes (`status.conditions[]` với `type/status/reason/message/lastTransitionTime`) có giá trị: tool generic dựa vào nó được.
+- **Events theo UID:** field selector `involvedObject.uid=<uid>` thay vì theo tên. Object bị xóa rồi tạo lại với cùng tên sẽ có UID mới, nên events của "người tiền nhiệm" không lẫn vào. Smoke test đã xác nhận API server thật hỗ trợ selector này.
+- **Events của object cluster-scoped:** event của node nằm trong một namespace (thường là `default`). Với object không có namespace, phải list events ở **mọi** namespace (`Events("")`).
+- **Annotation cũng có thể chứa bí mật:** `kubectl.kubernetes.io/last-applied-configuration` là bản sao đầy đủ của object, nên với Secret nó chứa luôn giá trị bí mật. Describe bỏ annotation này.
+- **Refactor để dùng chung:** phần in events được tách thành `writeEvents` và dùng cho cả describe pod lẫn describe generic.
+
+### Thể hiện trong code
+
+**k8s** (`internal/k8s/describe_generic.go`):
+
+```go
+func (c *client) Describe(ctx, rt, namespace, name) (string, error) {
+    if rt == Pods { return c.DescribePod(ctx, namespace, name) }   // bản chi tiết có sẵn
+    obj, err := rt.get(ctx, c, namespace, name)                    // typed hoặc unstructured
+    u, err := toUnstructured(obj)                                  // một dạng chung
+    events, evErr := c.eventsFor(ctx, u)                           // theo UID
+    return formatDescription(rt, u, events, evErr, time.Now()), nil
+}
+```
+
+- `toUnstructured`: nếu đã là `*unstructured.Unstructured` (resource dynamic) thì dùng luôn; nếu là typed thì chuyển qua `DefaultUnstructuredConverter`.
+- `eventsFor`: dùng `fields.OneTermEqualSelector("involvedObject.uid", uid)` và list trong namespace của object (`""` nghĩa là mọi namespace với object cluster-scoped). Sau đó lọc lại phía client theo UID, vì fake clientset không áp dụng field selector (cùng lý do như phase (e)).
+- `formatDescription`: metadata dùng các getter của `unstructured` (`GetLabels`, `GetOwnerReferences`, …). `describableAnnotations` bỏ last-applied và cắt giá trị dài quá 80 ký tự.
+- `writeConditions`: `unstructured.NestedSlice(obj, "status", "conditions")`, rồi đọc từng field bằng `NestedString`. `lastTransitionTime` được parse theo RFC3339 để hiển thị tuổi kiểu kubectl (`duration.HumanDuration`, ví dụ `60m`). Kết quả được sắp xếp theo type để thứ tự ổn định.
+- `writeEvents` được tách ra từ `formatPodDescription` và dùng chung.
+- `Describe` được thêm vào interface; `DescribePod` vẫn giữ nguyên (theo spec ban đầu).
+
+**UI:**
+- `openDescribeMsg{rt, resource}` thay cho `{pod}`.
+- `resourcesView` và `treeView` cho `d` hoạt động trên mọi dòng; help bar hiện `d describe` cho mọi loại.
+- `detailView.openDescribe(c, rt, r)` có id `describe:<type>:<key>` (thêm loại resource vào id, vì một deployment và một service có thể cùng tên).
+- Esc vẫn quay về bảng hoặc cây nhờ `returnTo` (phase 3.2).
+
+### Test liên quan
+- `internal/k8s/describe_generic_test.go`:
+  - `TestDescribeDeployment`: kind, API version, labels, annotation `team`; hai condition (có reason, message, `60m`); **event của deployment cũ cùng tên (khác UID) bị loại**; last-applied không xuất hiện;
+  - `TestDescribeClusterScopedFindsEventsAnywhere`: event của node nằm ở `default` vẫn được tìm thấy; không có dòng Namespace;
+  - `TestDescribeCRDAndSecret`: conditions của CRD đọc generic; giá trị Secret không lộ;
+  - `TestDescribePodsUsesPodDescription`.
+- `readonly_test.go`: `Describe` có trong allowlist và được gọi cho mọi type.
+- `internal/ui/root_test.go` → `TestDescribeAnyResource`: `d` trên deployment (kèm tiêu đề), `d` trên node ReplicaSet trong cây, Esc về cây.
+- Thủ công trên envtest: hai event cùng tên `web`, một với UID thật và một với UID giả; chỉ event đúng được hiển thị.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Events lọc theo tên lẫn events của object cũ cùng tên | Field selector `involvedObject.uid` + lọc lại phía client |
+| Không thấy events của node | List events ở mọi namespace với object cluster-scoped |
+| `last-applied-configuration` làm lộ giá trị Secret, và rất dài | `describableAnnotations` bỏ nó, cắt các giá trị dài |
+| Mỗi loại resource có `status` khác nhau | Chỉ dựa vào quy ước `status.conditions` |
+| Id của detail trùng nhau giữa deployment và service cùng tên | Id có thêm tên loại resource |
 

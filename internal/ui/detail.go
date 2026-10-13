@@ -66,11 +66,15 @@ func (v *detailView) refresh() tea.Cmd {
 	}
 }
 
-// openDescribe shows `kubectl describe`-like output for a pod.
-func (v *detailView) openDescribe(c k8s.Client, pod k8s.PodInfo) tea.Cmd {
-	return v.open("Describe "+pod.Key(), "describe:"+pod.Key(), true,
+// openDescribe shows `kubectl describe`-like output for any object.
+func (v *detailView) openDescribe(c k8s.Client, rt *k8s.ResourceType, r k8s.Resource) tea.Cmd {
+	name := r.Name
+	if r.Namespace != "" {
+		name = r.Namespace + "/" + r.Name
+	}
+	return v.open("Describe "+rt.Name+" "+name, "describe:"+rt.Name+":"+r.Key(), true,
 		func(ctx context.Context) (string, error) {
-			return c.DescribePod(ctx, pod.Namespace, pod.Name)
+			return c.Describe(ctx, rt, r.Namespace, r.Name)
 		})
 }
 

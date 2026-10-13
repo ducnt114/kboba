@@ -30,6 +30,7 @@ var readOnlyMethods = []string{
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
+	"Describe",
 }
 
 func TestClientInterfaceIsReadOnly(t *testing.T) {
@@ -187,6 +188,7 @@ func TestClientOnlyReads(t *testing.T) {
 		if _, err := c.ListResources(ctx, rt, "default", ""); err != nil {
 			t.Fatal(err)
 		}
+		_, _ = c.Describe(ctx, rt, "default", "web") // not-found is fine here
 	}
 	for _, a := range c.metrics.(*metricsfake.Clientset).Actions() {
 		if !isRead(a) {

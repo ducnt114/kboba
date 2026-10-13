@@ -89,6 +89,14 @@ func formatPodDescription(pod *corev1.Pod, events []corev1.Event, eventsErr erro
 		}
 	}
 
+	writeEvents(w, events, eventsErr, age)
+
+	w.Flush()
+	return b.String()
+}
+
+// writeEvents prints the Events section shared by every describe.
+func writeEvents(w io.Writer, events []corev1.Event, eventsErr error, age func(time.Time) string) {
 	fmt.Fprintln(w, "Events:")
 	switch {
 	case eventsErr != nil:
@@ -113,9 +121,6 @@ func formatPodDescription(pod *corev1.Pod, events []corev1.Event, eventsErr erro
 				age(eventTime(ev)), ev.Type, reason, orNone(from), strings.TrimSpace(ev.Message))
 		}
 	}
-
-	w.Flush()
-	return b.String()
 }
 
 func writeContainers(w io.Writer, specs []corev1.Container, statuses []corev1.ContainerStatus, age func(time.Time) string) {

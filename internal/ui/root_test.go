@@ -211,6 +211,20 @@ func (f *fakeClient) podResource(p k8s.PodInfo) k8s.Resource {
 	return r
 }
 
+// Describe answers like DescribePod for pods and with a generic text for
+// other types, failing for objects that don't exist.
+func (f *fakeClient) Describe(ctx context.Context, rt *k8s.ResourceType, ns, name string) (string, error) {
+	if rt == k8s.Pods {
+		return f.DescribePod(ctx, ns, name)
+	}
+	for _, r := range f.others[rt.Name] {
+		if r.Namespace == ns && r.Name == name {
+			return "Kind: " + rt.Name + "\nName: " + name, nil
+		}
+	}
+	return "", errors.New(rt.Name + " \"" + name + "\" not found")
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -549,7 +563,7 @@ func TestDescribe(t *testing.T) {
 	}
 
 	// A late result for another pod must not replace the current one.
-	m = send(t, m, detailLoadedMsg{id: "describe:team-a/worker", text: "Name: worker"})
+	m = send(t, m, detailLoadedMsg{id: "describe:pods:team-a/worker", text: "Name: worker"})
 	if m.detail.text != "Name: api" {
 		t.Fatalf("stale describe applied: %q", m.detail.text)
 	}
@@ -603,11 +617,9 @@ func TestSwitchResourceType(t *testing.T) {
 	if len(m.resources.rowKeys) != 3 {
 		t.Fatalf("rows = %v", m.resources.rowKeys)
 	}
-	// d is a pod-only action.
-	m = send(t, m, press("d"))
-	if m.active != viewResources {
-		t.Fatalf("d on a deployment opened view %v", m.active)
-	}
+	// y opens the YAML of a deployment too (d does as well since phase 3.3).
+	m = send(t, m, press("y"))
+	m = send(t, m, press("esc"))
 
 	// Namespace switches keep the resource type.
 	m = typeCommand(t, m, "ns all")
@@ -1315,5 +1327,30 @@ func TestTreeLateResultIgnored(t *testing.T) {
 	m = send(t, m, treeLoadedMsg{id: "services:default/web", root: &k8s.TreeNode{Type: k8s.Services}})
 	if got := treeNames(m); len(got) != 3 {
 		t.Fatalf("late result for another object replaced the tree: %q", got)
+	}
+}
+
+func TestDescribeAnyResource(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("d")) // team-a/api
+	if m.active != viewDetail || m.detail.text != "Kind: deployments\nName: api" {
+		t.Fatalf("active=%v text=%q", m.active, m.detail.text)
+	}
+	if !strings.Contains(m.detail.View(), "Describe deployments team-a/api") {
+		t.Fatalf("title:\n%s", m.detail.View())
+	}
+	m = send(t, m, press("esc"))
+
+	// From the tree, too: describe the ReplicaSet node.
+	m = send(t, m, press("x"))
+	m = send(t, m, press("j"))
+	m = send(t, m, press("d"))
+	if m.detail.text != "Kind: replicasets\nName: api-rs" {
+		t.Fatalf("text = %q", m.detail.text)
+	}
+	m = send(t, m, press("esc"))
+	if m.active != viewTree {
+		t.Fatalf("esc should return to the tree, got %v", m.active)
 	}
 }

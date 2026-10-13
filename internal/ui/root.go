@@ -220,7 +220,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openDescribeMsg:
 		m.rememberReturn()
-		cmd := m.detail.openDescribe(m.client, msg.pod)
+		cmd := m.detail.openDescribe(m.client, msg.rt, msg.resource)
 		m.setActive(viewDetail)
 		return m, cmd
 

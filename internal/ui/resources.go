@@ -72,8 +72,11 @@ type (
 		resource k8s.Resource
 	}
 	openLogsMsg     struct{ pod k8s.PodInfo }
-	openDescribeMsg struct{ pod k8s.PodInfo }
-	openYAMLMsg     struct {
+	openDescribeMsg struct {
+		rt       *k8s.ResourceType
+		resource k8s.Resource
+	}
+	openYAMLMsg struct {
 		rt       *k8s.ResourceType
 		resource k8s.Resource
 	}
@@ -356,9 +359,10 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 			return v, func() tea.Msg { return openLogsMsg{pod: p} }
 		}
 		return v, nil
-	case key.Matches(msg, resourceKeyMap.Describe) && v.q.rt == k8s.Pods:
-		if p, ok := v.selectedPod(); ok {
-			return v, func() tea.Msg { return openDescribeMsg{pod: p} }
+	case key.Matches(msg, resourceKeyMap.Describe):
+		if r, ok := v.selected(); ok {
+			rt := v.q.rt
+			return v, func() tea.Msg { return openDescribeMsg{rt: rt, resource: r} }
 		}
 		return v, nil
 	case key.Matches(msg, resourceKeyMap.Sort):
@@ -643,10 +647,11 @@ func (v resourcesView) keys() []key.Binding {
 	b := []key.Binding{k.Up, k.Down}
 	switch v.q.rt {
 	case k8s.Pods:
-		b = append(b, k.Logs, k.Describe)
+		b = append(b, k.Logs)
 	case k8s.Deployments, k8s.ReplicaSets, k8s.Services:
 		b = append(b, k.Drill, k.AllLogs)
 	}
+	b = append(b, k.Describe)
 	b = append(b, treeKeyMap.Tree)
 	if v.q.rt == k8s.Pods && v.q.selector != "" {
 		b = append(b, k.AllLogs)
