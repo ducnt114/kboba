@@ -32,12 +32,21 @@ type NamespaceMemory interface {
 	Save() error                                // slow (disk); run in a tea.Cmd
 }
 
+// CommandHistory remembers ":" commands across runs (↑/↓ in the command
+// bar). Like NamespaceMemory it is declared where it is used.
+type CommandHistory interface {
+	History() []string // oldest first
+	AddHistory(cmd string)
+	Save() error
+}
+
 // Options are the startup settings, usually from command-line flags.
 type Options struct {
 	Context   string // empty: kubeconfig current-context
 	Namespace string // empty: last used, else the context's default namespace
-	// Memory may be nil: nothing is remembered.
-	Memory NamespaceMemory
+	// Memory and History may be nil: nothing is remembered.
+	Memory  NamespaceMemory
+	History CommandHistory
 	// StartupWarning is shown in the status bar once connected (e.g. the
 	// state file could not be read).
 	StartupWarning string
@@ -113,7 +122,15 @@ type Model struct {
 
 	commandMode bool
 	command     textinput.Model
-	help        help.Model
+	// histPos is the history entry shown in the command bar while browsing
+	// with ↑/↓ (-1: not browsing); histDraft is what was typed before.
+	histPos   int
+	histDraft string
+	// Completion data: names offered as you type after ":".
+	contextNames   []string
+	namespaceNames []string
+	typeNames      []string
+	help           help.Model
 
 	status      string
 	statusIsErr bool
@@ -129,7 +146,12 @@ type Model struct {
 func New(newClient ClientFactory, opts Options) Model {
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = "pods | deploy | svc | events | nodes | ctx | ns | quit"
+	ti.Placeholder = "pods | deploy | svc | events | nodes | <any type> | ctx | ns | quit"
+	// Tab completes the suggestion shown after the cursor; ctrl+n/ctrl+p
+	// cycle suggestions. ↑/↓ are kept for history, like in a shell.
+	ti.ShowSuggestions = true
+	ti.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("ctrl+n"))
+	ti.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
 
 	return Model{
 		newClient:  newClient,
@@ -256,7 +278,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.contexts, cmd = m.contexts.Update(msg)
 		return m, cmd
 
+	case completionsMsg:
+		m.typeNames, m.namespaceNames = msg.types, msg.namespaces
+		return m, nil
+
 	case namespacesLoadedMsg:
+		if msg.err == nil {
+			m.namespaceNames = msg.names
+		}
 		var cmd tea.Cmd
 		m.namespaces, cmd = m.namespaces.Update(msg)
 		return m, cmd
@@ -301,9 +330,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.exitCommandMode()
 			return m, nil
 		case tea.KeyEnter:
-			input := m.command.Value()
+			input := strings.TrimSpace(m.command.Value())
 			m.exitCommandMode()
-			return m.runCommand(input)
+			save := m.recordCommand(input)
+			next, cmd := m.runCommand(input)
+			return next, tea.Batch(cmd, save)
+		case tea.KeyUp:
+			m.browseHistory(-1)
+			return m, nil
+		case tea.KeyDown:
+			m.browseHistory(+1)
+			return m, nil
 		}
 		var cmd tea.Cmd
 		m.command, cmd = m.command.Update(msg)
@@ -319,6 +356,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, globalKeyMap.Command):
 			m.commandMode = true
 			m.command.SetValue("")
+			m.command.SetSuggestions(m.suggestions())
+			m.histPos, m.histDraft = -1, ""
 			return m, m.command.Focus()
 		case key.Matches(msg, globalKeyMap.Help):
 			m.help.ShowAll = !m.help.ShowAll
@@ -327,6 +366,109 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m.updateActive(msg)
+}
+
+// suggestions is what the command bar offers to complete: recent
+// commands first, then commands, resource types, contexts and namespaces.
+func (m Model) suggestions() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	if m.opts.History != nil {
+		h := m.opts.History.History()
+		for i := len(h) - 1; i >= 0; i-- {
+			add(h[i])
+		}
+	}
+	for _, c := range []string{"ctx", "ns", "ns all", "quit"} {
+		add(c)
+	}
+	types := m.typeNames
+	if len(types) == 0 { // discovery not loaded (yet): the built-in views
+		for _, rt := range k8s.ResourceTypes() {
+			types = append(types, rt.Name)
+		}
+	}
+	for _, t := range types {
+		add(t)
+	}
+	for _, c := range m.contextNames {
+		add("ctx " + c)
+	}
+	for _, n := range m.namespaceNames {
+		add("ns " + n)
+	}
+	return out
+}
+
+// browseHistory shows the previous (dir -1) or next (+1) command.
+func (m *Model) browseHistory(dir int) {
+	if m.opts.History == nil {
+		return
+	}
+	h := m.opts.History.History()
+	if len(h) == 0 {
+		return
+	}
+	pos := m.histPos
+	switch {
+	case pos == -1 && dir < 0: // start browsing from the newest
+		m.histDraft = m.command.Value()
+		pos = len(h) - 1
+	case pos == -1:
+		return
+	default:
+		pos += dir
+	}
+	switch {
+	case pos < 0:
+		pos = 0
+	case pos >= len(h): // past the newest: back to what was being typed
+		m.histPos = -1
+		m.command.SetValue(m.histDraft)
+		m.command.CursorEnd()
+		return
+	}
+	m.histPos = pos
+	m.command.SetValue(h[pos])
+	m.command.CursorEnd()
+}
+
+// recordCommand adds input to the history; the disk write is a tea.Cmd.
+func (m Model) recordCommand(input string) tea.Cmd {
+	hist := m.opts.History
+	if hist == nil || input == "" {
+		return nil
+	}
+	hist.AddHistory(input)
+	return func() tea.Msg {
+		if err := hist.Save(); err != nil {
+			return statusMsg{text: "save state: " + err.Error(), isErr: true}
+		}
+		return nil
+	}
+}
+
+// completionsMsg carries names for command completion, loaded in the
+// background after connecting. Failures just mean fewer suggestions.
+type completionsMsg struct {
+	types      []string
+	namespaces []string
+}
+
+func loadCompletions(c k8s.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+		types, _ := c.ResourceTypeNames(ctx)
+		namespaces, _ := c.ListNamespaces(ctx)
+		return completionsMsg{types: types, namespaces: namespaces}
+	}
 }
 
 func (m *Model) exitCommandMode() {
@@ -389,6 +531,11 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	firstConnect := m.client == nil
 	m.client = msg.client
 	m.context = msg.context.Name
+	m.contextNames = make([]string, 0, len(msg.contexts))
+	for _, c := range msg.contexts {
+		m.contextNames = append(m.contextNames, c.Name)
+	}
+	m.typeNames, m.namespaceNames = nil, nil // belong to the previous context
 
 	// Precedence: --namespace (startup only) > remembered > context's > "default".
 	remembered, ok := m.lastNamespace(m.context)
@@ -414,7 +561,7 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	m.nav = nil
 	watchCmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: m.namespace}, "")
 	m.setActive(viewResources)
-	return m, tea.Batch(cmd, watchCmd, saveCmd)
+	return m, tea.Batch(cmd, watchCmd, saveCmd, loadCompletions(m.client))
 }
 
 func (m Model) lastNamespace(context string) (string, bool) {

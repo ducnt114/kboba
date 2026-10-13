@@ -38,11 +38,13 @@ func main() {
 	}
 	opts := ui.Options{Context: *context, Namespace: *namespace}
 
-	// Remember the last namespace per context in kboba's own state file
+	// Remember the last namespace per context and the ":" command history
+	// in kboba's own state file
 	// (never in the kubeconfig). Problems here must not stop kboba.
 	if path, err := state.DefaultPath(); err == nil {
 		store, err := state.Open(path)
 		opts.Memory = store
+		opts.History = store
 		if err != nil {
 			opts.StartupWarning = err.Error()
 		}

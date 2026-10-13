@@ -36,6 +36,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 22. [Phase 3.1: Logs gộp của nhiều pod](#22-phase-31-logs-gộp-của-nhiều-pod)
 23. [Phase 3.2: Cây quan hệ ownerReferences](#23-phase-32-cây-quan-hệ-ownerreferences)
 24. [Phase 3.3: Describe cho mọi object](#24-phase-33-describe-cho-mọi-object)
+25. [Phase 3.4: Gợi ý và lịch sử cho lệnh `:`](#25-phase-34-gợi-ý-và-lịch-sử-cho-lệnh-)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -1385,7 +1386,7 @@ Ngoại lệ chỉ nằm ở **một chỗ**, có tên, có comment giải thíc
 | 3.1 | Logs gộp của nhiều pod (giống `stern`) | Gộp channel (fan-in), quản lý nhiều stream có vòng đời riêng | ✅ [mục 22](#22-phase-31-logs-gộp-của-nhiều-pod) |
 | 3.2 | Cây quan hệ ownerReferences | Dựng đồ thị từ nhiều danh sách, render dạng cây | ✅ [mục 23](#23-phase-32-cây-quan-hệ-ownerreferences) |
 | 3.3 | Describe generic + events cho mọi object | `unstructured` từ typed object, field selector theo UID | ✅ [mục 24](#24-phase-33-describe-cho-mọi-object) |
-| 3.4 | Gợi ý và lịch sử cho lệnh `:` | Suggestions của bubbles `textinput`, lưu lịch sử | ⏳ |
+| 3.4 | Gợi ý và lịch sử cho lệnh `:` | Suggestions của bubbles `textinput`, lưu lịch sử | ✅ [mục 25](#25-phase-34-gợi-ý-và-lịch-sử-cho-lệnh-) |
 
 ## 22. Phase 3.1: Logs gộp của nhiều pod
 
@@ -1626,4 +1627,69 @@ func (c *client) Describe(ctx, rt, namespace, name) (string, error) {
 | `last-applied-configuration` làm lộ giá trị Secret, và rất dài | `describableAnnotations` bỏ nó, cắt các giá trị dài |
 | Mỗi loại resource có `status` khác nhau | Chỉ dựa vào quy ước `status.conditions` |
 | Id của detail trùng nhau giữa deployment và service cùng tên | Id có thêm tên loại resource |
+
+## 25. Phase 3.4: Gợi ý và lịch sử cho lệnh `:`
+
+### Mục tiêu
+- **Gợi ý khi gõ:** gõ `:wid` thì phần còn lại `gets` hiện mờ ngay sau con trỏ; Tab để nhận, `ctrl+n`/`ctrl+p` để chuyển gợi ý khác. Danh sách gợi ý gồm: lệnh đã dùng gần đây, các lệnh cố định, **mọi loại resource mà server có** (từ discovery), `ctx <tên>` và `ns <tên>`.
+- **Lịch sử:** ↑/↓ duyệt các lệnh đã chạy, giống shell. Đi quá lệnh mới nhất thì trả lại đoạn đang gõ dở. Lịch sử được lưu qua các lần chạy (100 lệnh gần nhất) trong cùng file state của phase 2.7.
+
+### Học được gì
+- **Suggestions có sẵn trong bubbles `textinput`:** `ShowSuggestions`, `SetSuggestions`, khớp theo tiền tố không phân biệt hoa thường (`updateSuggestions`), và phần gợi ý được render mờ sau con trỏ.
+- **Đổi keymap của component khi bị xung đột:** mặc định ↑/↓ dùng để chuyển gợi ý, nhưng người dùng terminal kỳ vọng ↑/↓ là lịch sử. Gán lại `NextSuggestion`/`PrevSuggestion` sang `ctrl+n`/`ctrl+p`, rồi xử lý ↑/↓ ở root *trước khi* chuyển phím cho textinput.
+- **Nạp dữ liệu nền cho UX:** danh sách loại resource và namespace được nạp trong một Cmd sau khi kết nối. Nếu chưa xong (hoặc lỗi) thì vẫn gợi ý được các view built-in, chỉ ít hơn. Không bao giờ block hay báo lỗi.
+- **Mở rộng một interface sẵn có theo hướng consumer-side:** UI khai báo `CommandHistory` riêng, và `state.Store` đáp ứng được cả `NamespaceMemory` lẫn `CommandHistory` mà không cần biết UI.
+
+### Thể hiện trong code
+
+**k8s** (`internal/k8s/discovery.go` → `ResourceTypeNames`): tên các view built-in cộng với mọi resource có cả `list` lẫn `watch` từ `discovery.ServerPreferredResources`, bỏ subresource, sắp xếp và loại trùng (`sortedKeys`). Khi discovery lỗi thì vẫn trả về các tên built-in, kèm lỗi.
+
+**state** (`internal/state/state.go`): `file.History []string`, `MaxHistory = 100`.
+- `AddHistory` bỏ qua lệnh rỗng và lệnh trùng với lệnh ngay trước (giống `HISTCONTROL=ignoredups`), và chỉ giữ 100 lệnh cuối.
+- `History()` trả về **bản copy**, để caller không sửa được dữ liệu bên trong mutex.
+
+**UI** (`internal/ui/root.go`):
+
+```go
+ti.ShowSuggestions = true
+ti.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("ctrl+n"))  // giải phóng ↑/↓
+ti.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
+```
+
+- Khi mở command bar (`:`): `m.command.SetSuggestions(m.suggestions())`. `suggestions()` ghép theo thứ tự ưu tiên: lịch sử (mới nhất trước), các lệnh `ctx`/`ns`/`ns all`/`quit`, loại resource (`typeNames`, hoặc các view built-in khi chưa nạp xong), `ctx <tên>` cho mọi context, `ns <tên>` cho các namespace đã biết. Loại trùng bằng một map.
+- `loadCompletions` (Cmd chạy sau `handleClientReady`) gọi `ResourceTypeNames` và `ListNamespaces`, bỏ qua lỗi, rồi trả về `completionsMsg`. Mỗi lần mở view namespaces cũng cập nhật `namespaceNames`. Khi đổi context, `typeNames`/`namespaceNames` được xóa vì thuộc cluster cũ.
+- `browseHistory(dir)` dùng `histPos` (-1 nghĩa là không duyệt) và `histDraft` (đoạn đang gõ dở, được lưu khi bấm ↑ lần đầu):
+  - ↑ đầu tiên nhảy tới lệnh mới nhất;
+  - ↑ tiếp theo dừng lại ở lệnh cũ nhất;
+  - ↓ đi quá lệnh mới nhất thì trả lại `histDraft`.
+- Enter: `recordCommand` cập nhật lịch sử trong bộ nhớ ngay, rồi ghi đĩa trong Cmd (`Save` ghi toàn bộ trạng thái hiện tại, nên thứ tự hoàn thành của các lần lưu không quan trọng, giống phase 2.7).
+- `main.go`: `opts.History = store`, cùng một `*state.Store` với `opts.Memory`.
+
+### Test liên quan
+- `internal/k8s/discovery_test.go` → `TestResourceTypeNames`: có built-in, configmaps, secrets, widgets; không có `pods/log` và `bindings`.
+- `internal/state/state_test.go` → `TestHistory`: bỏ trùng và rỗng, `History()` là bản copy, giữ đúng 100 lệnh, lưu và đọc lại được.
+- `internal/ui/root_test.go`:
+  - `TestCommandSuggestions`: có `ctx prod`, `ns team-a`, `widgets`; `wid` + Tab thành `widgets`; `ctx p` + Tab + Enter chuyển sang context `prod`;
+  - `TestCommandHistory`: ghi và lưu; ↑/↑/↑ dừng ở lệnh cũ nhất; ↓ quay lại; đi quá lệnh mới nhất trả lại `"no"` đang gõ dở; chạy lại lệnh từ lịch sử; lịch sử đứng đầu danh sách gợi ý.
+- Thủ công trên envtest (discovery thật): gõ `:wid` hiện `:widgets`; Tab + Enter mở bảng Widgets; ↑↑ gọi lại lệnh; `state.yaml` có mục `history:`.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| ↑/↓ của textinput chuyển gợi ý, xung đột với lịch sử | Đổi gợi ý sang `ctrl+n`/`ctrl+p`; root xử lý ↑/↓ trước |
+| Duyệt lịch sử làm mất đoạn đang gõ dở | `histDraft` |
+| Gợi ý của context cũ vẫn còn sau khi đổi context | Xóa `typeNames`/`namespaceNames` khi kết nối context mới |
+| Discovery chậm hoặc lỗi làm command bar không có gợi ý | Mặc định gợi ý các view built-in; nạp nền, bỏ qua lỗi |
+| Trả về slice nội bộ của store cho caller | `History()` trả về bản copy |
+| `contextNames[:0]` dùng lại mảng mà các bản copy cũ của model có thể vẫn trỏ tới | Tạo slice mới |
+
+---
+
+## Tổng kết Phase 3
+
+- **3.1** thêm một package concurrency thuần (`logmux`) và cho thấy cây context giúp quản lý N stream có vòng đời riêng.
+- **3.2** và **3.3** đi sâu vào mô hình dữ liệu của Kubernetes: ownerReferences và UID, quy ước `status.conditions`, events theo UID. Cả hai đều dùng lại `tableModel`, `detailView` và `returnTo`, gần như không có view mới phải viết từ đầu.
+- **3.4** cho thấy một component có sẵn (textinput suggestions) chỉ cần cấu hình lại keymap là khớp với thói quen của người dùng terminal.
+
+Mạch chung vẫn như ở Phase 2: abstraction đặt đúng chỗ thì tính năng mới chủ yếu là *ghép* những thứ đã có.
 

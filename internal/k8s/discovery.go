@@ -206,3 +206,37 @@ func listUnstructured(gvr schema.GroupVersionResource) func(context.Context, *cl
 		return objects(l.Items), nil
 	}
 }
+
+// ResourceTypeNames lists the names usable after ":" — the built-in views
+// plus every listable and watchable resource the server serves (plural
+// names, as `kubectl api-resources` shows them). For command completion.
+func (c *client) ResourceTypeNames(ctx context.Context) ([]string, error) {
+	seen := map[string]bool{}
+	for _, rt := range ResourceTypes() {
+		seen[rt.Name] = true
+	}
+	if c.connErr != nil {
+		return sortedKeys(seen), c.connErr
+	}
+	lists, err := discovery.ServerPreferredResources(c.clientset.Discovery())
+	if len(lists) == 0 && err != nil {
+		return sortedKeys(seen), fmt.Errorf("discovery: %w", err)
+	}
+	for _, list := range lists {
+		for _, r := range list.APIResources {
+			if !strings.Contains(r.Name, "/") && slices.Contains(r.Verbs, "list") && slices.Contains(r.Verbs, "watch") {
+				seen[r.Name] = true
+			}
+		}
+	}
+	return sortedKeys(seen), nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}

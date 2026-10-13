@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -84,5 +85,43 @@ func TestConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if _, ok := s.LastNamespace("dev"); !ok {
 		t.Fatal("lost the namespace")
+	}
+}
+
+func TestHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	s, _ := Open(path)
+
+	s.AddHistory("deploy")
+	s.AddHistory("deploy") // repeated: not duplicated
+	s.AddHistory("")       // ignored
+	s.AddHistory("ns kube-system")
+	if got := s.History(); len(got) != 2 || got[0] != "deploy" || got[1] != "ns kube-system" {
+		t.Fatalf("history = %v", got)
+	}
+
+	// The returned slice is a copy.
+	h := s.History()
+	h[0] = "changed"
+	if s.History()[0] != "deploy" {
+		t.Fatal("History must return a copy")
+	}
+
+	for i := range MaxHistory + 10 {
+		s.AddHistory(fmt.Sprintf("cmd-%d", i))
+	}
+	if n := len(s.History()); n != MaxHistory {
+		t.Fatalf("kept %d commands, want %d", n, MaxHistory)
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := s2.History(), s.History(); len(got) != len(want) || got[len(got)-1] != want[len(want)-1] {
+		t.Fatal("history not persisted")
 	}
 }

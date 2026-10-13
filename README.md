@@ -72,7 +72,8 @@ make build
 
 Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
 `current-context`, and the namespace you last used in that context (else the
-context's namespace). kboba remembers that in its own file,
+context's namespace). kboba remembers that, and your `:` command history, in
+its own file,
 `~/.config/kboba/state.yaml` (`$XDG_CONFIG_HOME`); it never writes to your
 kubeconfig.
 
@@ -106,6 +107,11 @@ kubeconfig.
 Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:rs`, `:svc`, `:events` (`:ev`),
 `:nodes` (`:no`), any other resource type (`:cm`, `:ingresses`,
 `:certificates.cert-manager.io`, ...), `:ctx [name]`, `:ns [name|all]`, `:q`.
+
+In the command bar, `tab` completes the suggestion shown after the cursor
+(commands, every resource type the server has, contexts, namespaces, recent
+commands), `ctrl+n`/`ctrl+p` cycle suggestions, and `↑`/`↓` browse the
+command history (kept across runs in `~/.config/kboba/state.yaml`).
 
 ## Try it with kind (read-only ServiceAccount)
 

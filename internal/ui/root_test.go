@@ -225,6 +225,36 @@ func (f *fakeClient) Describe(ctx context.Context, rt *k8s.ResourceType, ns, nam
 	return "", errors.New(rt.Name + " \"" + name + "\" not found")
 }
 
+func (f *fakeClient) ResourceTypeNames(context.Context) ([]string, error) {
+	return []string{"deployments", "events", "nodes", "pods", "replicasets", "services", "widgets"}, nil
+}
+
+// fakeHistory is an in-memory CommandHistory.
+type fakeHistory struct {
+	mu    sync.Mutex
+	cmds  []string
+	saves int
+}
+
+func (f *fakeHistory) History() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cmds...)
+}
+
+func (f *fakeHistory) AddHistory(c string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cmds = append(f.cmds, c)
+}
+
+func (f *fakeHistory) Save() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves++
+	return nil
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -1352,5 +1382,89 @@ func TestDescribeAnyResource(t *testing.T) {
 	m = send(t, m, press("esc"))
 	if m.active != viewTree {
 		t.Fatalf("esc should return to the tree, got %v", m.active)
+	}
+}
+
+// typeKeys types s into the focused input, rune by rune.
+func typeKeys(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	for _, r := range s {
+		m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	return m
+}
+
+func TestCommandSuggestions(t *testing.T) {
+	m := startModel(t, Options{})
+
+	m = send(t, m, press(":"))
+	got := m.command.AvailableSuggestions()
+	for _, want := range []string{"ctx", "ns all", "deployments", "widgets", "ctx prod", "ns team-a"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("suggestions %v lack %q", got, want)
+		}
+	}
+
+	// Tab completes the first match.
+	m = typeKeys(t, m, "wid")
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if v := m.command.Value(); v != "widgets" {
+		t.Fatalf("after tab value = %q", v)
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	m = send(t, m, press(":"))
+	m = typeKeys(t, m, "ctx p")
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.context != "prod" {
+		t.Fatalf("context = %q", m.context)
+	}
+}
+
+func TestCommandHistory(t *testing.T) {
+	hist := &fakeHistory{}
+	m := startModel(t, Options{History: hist})
+
+	m = typeCommand(t, m, "deploy")
+	m = typeCommand(t, m, "ns default")
+	if !slices.Equal(hist.cmds, []string{"deploy", "ns default"}) || hist.saves != 2 {
+		t.Fatalf("history=%v saves=%d", hist.cmds, hist.saves)
+	}
+
+	up := tea.KeyMsg{Type: tea.KeyUp}
+	down := tea.KeyMsg{Type: tea.KeyDown}
+	m = send(t, m, press(":"))
+	m = typeKeys(t, m, "no") // a draft, restored after browsing
+	m = send(t, m, up)
+	if v := m.command.Value(); v != "ns default" {
+		t.Fatalf("↑ = %q", v)
+	}
+	m = send(t, m, up)
+	m = send(t, m, up) // stays at the oldest
+	if v := m.command.Value(); v != "deploy" {
+		t.Fatalf("↑↑↑ = %q", v)
+	}
+	m = send(t, m, down)
+	if v := m.command.Value(); v != "ns default" {
+		t.Fatalf("↓ = %q", v)
+	}
+	m = send(t, m, down)
+	if v := m.command.Value(); v != "no" {
+		t.Fatalf("past the newest should restore the draft, got %q", v)
+	}
+
+	// Re-run a command from history.
+	m = send(t, m, up)
+	m = send(t, m, up)
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.resources.q.rt != k8s.Deployments {
+		t.Fatalf("history command not run: %s", m.resources.q.rt.Name)
+	}
+
+	// History is offered as suggestions too, most recent first.
+	m = send(t, m, press(":"))
+	if s := m.command.AvailableSuggestions(); s[0] != "deploy" || s[1] != "ns default" {
+		t.Fatalf("suggestions start with %v", s[:2])
 	}
 }

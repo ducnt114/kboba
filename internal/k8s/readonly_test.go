@@ -27,6 +27,7 @@ var readOnlyMethods = []string{
 	"ListMetrics",
 	"ListResources",
 	"ResolveResourceType",
+	"ResourceTypeNames",
 	"GetPod",
 	"StreamLogs",
 	"DescribePod",
@@ -123,6 +124,9 @@ func TestDynamicClientOnlyReads(t *testing.T) {
 	c, dc := newFakeDiscoveryClient(t, widgetCRD(), widget("a", "w1", 1, "True"))
 	ctx := context.Background()
 
+	if _, err := c.ResourceTypeNames(ctx); err != nil {
+		t.Fatal(err)
+	}
 	rt, err := c.ResolveResourceType(ctx, "widgets")
 	if err != nil {
 		t.Fatal(err)

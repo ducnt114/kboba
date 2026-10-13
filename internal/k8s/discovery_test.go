@@ -209,3 +209,17 @@ func TestGetYAMLDynamicAndSecretRedaction(t *testing.T) {
 		t.Fatalf("secret yaml:\n%s", out)
 	}
 }
+
+func TestResourceTypeNames(t *testing.T) {
+	c, _ := newFakeDiscoveryClient(t)
+	got, err := c.ResourceTypeNames(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Built-ins + discovered list/watch-able resources; no subresources
+	// ("pods/log") and nothing that can't be watched ("bindings").
+	want := []string{"configmaps", "deployments", "events", "nodes", "pods", "replicasets", "secrets", "services", "widgets"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}

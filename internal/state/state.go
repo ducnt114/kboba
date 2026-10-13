@@ -19,7 +19,12 @@ type file struct {
 	// Namespaces maps a context name to the last namespace used in it.
 	// "" means "all namespaces"; a missing key means "nothing remembered".
 	Namespaces map[string]string `json:"namespaces,omitempty"`
+	// History holds the last ":" commands, oldest first.
+	History []string `json:"history,omitempty"`
 }
+
+// MaxHistory is how many commands are remembered.
+const MaxHistory = 100
 
 // Store is the remembered state. It is safe for concurrent use: the UI
 // updates it in memory, and Save may run in a background goroutine.
@@ -76,6 +81,30 @@ func (s *Store) SetLastNamespace(context, namespace string) {
 		s.data.Namespaces = map[string]string{}
 	}
 	s.data.Namespaces[context] = namespace
+}
+
+// History returns the remembered commands, oldest first (a copy).
+func (s *Store) History() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.data.History...)
+}
+
+// AddHistory remembers a command, in memory only; call Save to persist.
+// Repeating the previous command doesn't add a duplicate, and only the
+// last MaxHistory commands are kept.
+func (s *Store) AddHistory(cmd string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.data.History
+	if cmd == "" || (len(h) > 0 && h[len(h)-1] == cmd) {
+		return
+	}
+	h = append(h, cmd)
+	if len(h) > MaxHistory {
+		h = h[len(h)-MaxHistory:]
+	}
+	s.data.History = h
 }
 
 // Save writes the current state to disk. It writes a temporary file and
