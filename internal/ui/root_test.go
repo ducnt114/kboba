@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/ducnt114/kboba/internal/k8s"
+	"github.com/ducnt114/kboba/internal/logmux"
 )
 
 // fakeClient is an in-memory k8s.Client for UI tests.
@@ -1058,5 +1059,116 @@ func TestForbiddenMetricsStopsPolling(t *testing.T) {
 				t.Fatal("a final failure must not schedule another poll")
 			}
 		}
+	}
+}
+
+func TestAggregatedLogs(t *testing.T) {
+	m := startModel(t, Options{})
+	fc := m.client.(*fakeClient)
+	m = typeCommand(t, m, "deploy") // team-a/api (app=api) is the first row
+
+	m = send(t, m, press("l"))
+	if m.active != viewLogs || m.logs.multi == nil {
+		t.Fatalf("active=%v multi=%v", m.active, m.logs.multi != nil)
+	}
+	w := fc.watches[len(fc.watches)-1]
+	if w.rt != k8s.Pods || w.selector != "app=api" || w.namespace != "team-a" {
+		t.Fatalf("pod watch = %s ns=%q sel=%q", w.rt.Name, w.namespace, w.selector)
+	}
+	if len(fc.streams) != 1 || fc.streams[0].container != "app" {
+		t.Fatalf("streams = %+v", fc.streams)
+	}
+	if got := m.logs.buf.String(); got != "api │ app line 1\napi │ app line 2" {
+		t.Fatalf("buffer = %q", got)
+	}
+	view := ansi.Strip(m.logs.View())
+	if !strings.Contains(view, "Logs deployments/api (1 pods, 1 streaming)") || !strings.Contains(view, "api │ app line 1") {
+		t.Fatalf("view:\n%s", view)
+	}
+
+	// A rollout: a new pod appears (pending first, then running), the old
+	// one goes away.
+	gen := m.logs.gen
+	newPod := k8s.PodInfo{Namespace: "team-a", Name: "api-2", Status: "ContainerCreating", DefaultContainer: "app"}
+	m = send(t, m, logPodEventsMsg{gen: gen, events: []k8s.ResourceEvent{{Type: k8s.Upserted, Resource: k8s.Resource{Name: "api-2", Pod: &newPod}}}})
+	if len(fc.streams) != 1 {
+		t.Fatal("a pod whose container hasn't started must not be streamed yet")
+	}
+	newPod.Status = "Running"
+	m = send(t, m, logPodEventsMsg{gen: gen, events: []k8s.ResourceEvent{
+		{Type: k8s.Upserted, Resource: k8s.Resource{Name: "api-2", Pod: &newPod}},
+		{Type: k8s.Deleted, Resource: k8s.Resource{Name: "api"}},
+	}})
+	if len(fc.streams) != 2 {
+		t.Fatalf("new pod should be streamed: %+v", fc.streams)
+	}
+	if fc.streams[0].ctx.Err() == nil {
+		t.Fatal("the deleted pod's stream should be cancelled")
+	}
+	// Lines from later streams are delivered by the mux subscription;
+	// the test runner abandons blocked commands, so inject them directly
+	// (the mux itself is tested in internal/logmux).
+	m = send(t, m, logMuxLinesMsg{gen: gen, lines: []logmux.Line{{Source: "api-2", Text: "ready"}}})
+	if !strings.Contains(m.logs.buf.String(), "api-2 │ ready") {
+		t.Fatalf("buffer = %q", m.logs.buf.String())
+	}
+
+	// A stream that ends (container restarted) is restarted on the next
+	// pod update; the end is noted once.
+	m = send(t, m, logMuxLinesMsg{gen: gen, lines: []logmux.Line{{Source: "api-2", Ended: true}}})
+	if _, running := m.logs.multi.streams["api-2"]; running {
+		t.Fatal("ended stream should be forgotten")
+	}
+	m = send(t, m, logPodEventsMsg{gen: gen, events: []k8s.ResourceEvent{{Type: k8s.Upserted, Resource: k8s.Resource{Name: "api-2", Pod: &newPod}}}})
+	if len(fc.streams) != 3 {
+		t.Fatalf("stream should restart: %d streams", len(fc.streams))
+	}
+
+	// Leaving cancels everything and stops the pod watch.
+	m = send(t, m, press("esc"))
+	if fc.streams[2].ctx.Err() == nil || !w.stopped {
+		t.Fatal("leaving the view must cancel streams and stop the watch")
+	}
+	if m.active != viewResources {
+		t.Fatalf("active = %v", m.active)
+	}
+}
+
+func TestAggregatedLogsFromDrillDown(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("enter")) // pods of deployments/api
+	m = send(t, m, press("l"))
+	if m.logs.multi == nil || m.logs.multi.title != "deployments/api" || m.logs.multi.selector != "app=api" {
+		t.Fatalf("multi = %+v", m.logs.multi)
+	}
+}
+
+func TestAggregatedLogsNeedSelector(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("j")) // team-a/legacy: no selector
+	m = send(t, m, press("l"))
+	if m.active != viewResources {
+		t.Fatal("l without a selector must do nothing (it would stream every pod)")
+	}
+	// Plain pods table (no drill-down): nothing either.
+	m = typeCommand(t, m, "pods")
+	m = send(t, m, press("l"))
+	if m.active != viewResources {
+		t.Fatal("l on the plain pods table must do nothing")
+	}
+}
+
+func TestRenderSource(t *testing.T) {
+	plain := func(s string) string { return s }
+	if got := ansi.Strip(renderSource("web-1 │ hello", plain)); got != "web-1 │ hello" {
+		t.Fatalf("got %q", got)
+	}
+	if got := renderSource("no separator", plain); got != "no separator" {
+		t.Fatalf("got %q", got)
+	}
+	if sourceStyle("web-1").GetForeground() != sourceStyle("web-1").GetForeground() {
+		t.Fatal("a pod must always get the same colour")
 	}
 }

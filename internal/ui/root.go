@@ -200,6 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setActive(viewLogs)
 		return m, cmd
 
+	case openMultiLogsMsg:
+		cmd := m.logs.openMulti(m.client, msg.title, msg.namespace, msg.selector)
+		m.setActive(viewLogs)
+		return m, cmd
+
 	case openDescribeMsg:
 		cmd := m.detail.openDescribe(m.client, msg.pod)
 		m.setActive(viewDetail)
@@ -245,7 +250,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resources, cmd = m.resources.Update(msg)
 		return m, cmd
 
-	case logStreamStartedMsg, logLinesMsg, logStreamEndedMsg:
+	case logStreamStartedMsg, logLinesMsg, logStreamEndedMsg,
+		logPodsWatchMsg, logPodEventsMsg, logPodStreamMsg, logMuxLinesMsg:
 		var cmd tea.Cmd
 		m.logs, cmd = m.logs.Update(msg)
 		return m, cmd

@@ -83,6 +83,10 @@ type logsView struct {
 	// (they differ from i once wrapped lines take several rows).
 	lineOffsets []int
 
+	// multi is set for aggregated logs (several pods, see multilogs.go);
+	// nil when following a single container.
+	multi *multiLogs
+
 	// The current stream's channels, kept so Update can re-subscribe.
 	lines  <-chan string
 	errs   <-chan error
@@ -110,6 +114,7 @@ func (v *logsView) open(c k8s.Client, pod k8s.PodInfo) tea.Cmd {
 	v.container = pod.DefaultContainer
 	v.opts = k8s.LogOptions{}
 	v.term = ""
+	v.multi = nil
 	return v.restart()
 }
 
@@ -126,6 +131,9 @@ func (v *logsView) restart() tea.Cmd {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	v.cancel = cancel
+	if v.multi != nil {
+		return v.restartMulti(ctx)
+	}
 
 	c, pod, container, opts, gen := v.client, v.pod, v.container, v.opts, v.gen
 	return func() tea.Msg {
@@ -143,6 +151,7 @@ func (v *logsView) restart() tea.Cmd {
 // stop cancels the stream: the HTTP connection is closed and the reader
 // goroutine exits, closing its channel.
 func (v *logsView) stop() {
+	v.multi.stop()
 	if v.cancel != nil {
 		v.cancel()
 		v.cancel = nil
@@ -202,6 +211,12 @@ func (v logsView) Update(msg tea.Msg) (logsView, tea.Cmd) {
 			return v, reportErr(fmt.Errorf("log stream: %w", msg.err))
 		}
 		return v, reportInfo("log stream closed")
+
+	case logPodsWatchMsg, logPodEventsMsg, logPodStreamMsg, logMuxLinesMsg:
+		if v.multi == nil {
+			return v, nil // from an aggregated view we already left
+		}
+		return v.updateMulti(msg)
 
 	case tea.KeyMsg:
 		if v.search.Focused() {
@@ -328,9 +343,20 @@ func (v *logsView) render() {
 	row := 0
 	for i := range v.buf.len() {
 		line := strings.ReplaceAll(v.buf.at(i), "\t", "    ")
-		if containsFold(line, v.term) {
+		matched := containsFold(line, v.term)
+		if matched {
 			v.matches = append(v.matches, v.buf.dropped+i)
-			line = highlightMatches(line, v.term, matchStyle)
+		}
+		highlight := func(s string) string {
+			if !matched {
+				return s
+			}
+			return highlightMatches(s, v.term, matchStyle)
+		}
+		if v.multi != nil {
+			line = renderSource(line, highlight)
+		} else {
+			line = highlight(line)
 		}
 		if v.wrap && v.viewport.Width > 0 {
 			line = ansi.Hardwrap(line, v.viewport.Width, true)
@@ -359,6 +385,9 @@ func (v *logsView) SetSize(w, h int) {
 
 func (v logsView) View() string {
 	title := titleStyle.Render(fmt.Sprintf("Logs %s/%s [%s]", v.pod.Namespace, v.pod.Name, v.container))
+	if v.multi != nil {
+		title = titleStyle.Render(v.multi.titleText())
+	}
 
 	flags := []string{"follow:" + onOff(v.follow), "wrap:" + onOff(v.wrap), "ts:" + onOff(v.opts.Timestamps)}
 	if v.opts.Previous {

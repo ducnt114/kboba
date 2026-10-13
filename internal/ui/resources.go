@@ -80,7 +80,7 @@ type (
 )
 
 type resourceKeys struct {
-	Up, Down, Logs, Drill, Describe, YAML, Filter, Sort, Reverse key.Binding
+	Up, Down, Logs, AllLogs, Drill, Describe, YAML, Filter, Sort, Reverse key.Binding
 }
 
 var resourceKeyMap = resourceKeys{
@@ -88,6 +88,7 @@ var resourceKeyMap = resourceKeys{
 	Down:     listKeyMap.Down,
 	Logs:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "logs")),
 	Drill:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "pods")),
+	AllLogs:  key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs of all pods")),
 	Describe: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
 	YAML:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yaml")),
 	Filter:   listKeyMap.Filter,
@@ -336,6 +337,8 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 			return v, nil
 		}
 		return v, goBack // the root model pops the navigation stack
+	case key.Matches(msg, resourceKeyMap.AllLogs):
+		return v, v.allLogs()
 	case key.Matches(msg, resourceKeyMap.Drill) && v.q.rt != k8s.Pods:
 		if r, ok := v.selected(); ok && r.Selector != "" {
 			rt := v.q.rt
@@ -373,6 +376,25 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 	var cmd tea.Cmd
 	v.table, cmd = v.table.Update(msg)
 	return v, cmd
+}
+
+// allLogs opens the aggregated logs of the selected deployment/service, or
+// of the pods table itself when it is a drill-down (it has a selector).
+func (v resourcesView) allLogs() tea.Cmd {
+	var msg openMultiLogsMsg
+	switch {
+	case v.q.rt == k8s.Pods && v.q.selector != "":
+		msg = openMultiLogsMsg{title: v.q.scope, namespace: v.q.namespace, selector: v.q.selector}
+	case v.q.rt != k8s.Pods:
+		r, ok := v.selected()
+		if !ok || r.Selector == "" {
+			return nil // without a selector we'd stream every pod
+		}
+		msg = openMultiLogsMsg{title: v.q.rt.Name + "/" + r.Name, namespace: r.Namespace, selector: r.Selector}
+	default:
+		return nil
+	}
+	return func() tea.Msg { return msg }
 }
 
 func (v resourcesView) selected() (k8s.Resource, bool) {
@@ -617,7 +639,10 @@ func (v resourcesView) keys() []key.Binding {
 	case k8s.Pods:
 		b = append(b, k.Logs, k.Describe)
 	case k8s.Deployments, k8s.Services:
-		b = append(b, k.Drill)
+		b = append(b, k.Drill, k.AllLogs)
+	}
+	if v.q.rt == k8s.Pods && v.q.selector != "" {
+		b = append(b, k.AllLogs)
 	}
 	b = append(b, k.YAML, k.Filter, k.Sort, k.Reverse)
 	if v.filter.Value() != "" {

@@ -31,6 +31,10 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 20. [Phase 2.9: Mọi resource, kể cả CRD](#20-phase-29-mọi-resource-kể-cả-crd-qua-discovery-và-dynamic-client)
 21. [Phase 10: Kiểm tra quyền trước bằng SelfSubjectAccessReview](#21-phase-10-kiểm-tra-quyền-trước-bằng-selfsubjectaccessreview)
 
+**Phase 3**
+
+22. [Phase 3.1: Logs gộp của nhiều pod](#22-phase-31-logs-gộp-của-nhiều-pod)
+
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
 | Phase | Commit    | Nội dung                                  |
@@ -1369,4 +1373,99 @@ Ngoại lệ chỉ nằm ở **một chỗ**, có tên, có comment giải thíc
 | Kiểm tra quyền metrics mỗi 15 giây tốn request | Chỉ kiểm tra ở lần poll đầu tiên của query |
 | Fake clientset mặc định trả `allowed: false` (nó chỉ lưu object) | `PrependReactor("create", "selfsubjectaccessreviews", ...)` để tự trả lời |
 | Tiêu đề kẹt ở `loading…` khi watch không bao giờ bắt đầu | `v.failed` hiện `(forbidden)` / `(error)` |
+
+---
+
+# Phase 3
+
+| Phase | Tính năng | Học được gì | Trạng thái |
+|---|---|---|---|
+| 3.1 | Logs gộp của nhiều pod (giống `stern`) | Gộp channel (fan-in), quản lý nhiều stream có vòng đời riêng | ✅ [mục 22](#22-phase-31-logs-gộp-của-nhiều-pod) |
+| 3.2 | Cây quan hệ ownerReferences | Dựng đồ thị từ nhiều danh sách, render dạng cây | ⏳ |
+| 3.3 | Describe generic + events cho mọi object | `unstructured` từ typed object, field selector theo UID | ⏳ |
+| 3.4 | Gợi ý và lịch sử cho lệnh `:` | Suggestions của bubbles `textinput`, lưu lịch sử | ⏳ |
+
+## 22. Phase 3.1: Logs gộp của nhiều pod
+
+### Mục tiêu
+Trên một deployment hoặc service (hoặc trong bảng pods sau khi drill-down), bấm `l` để xem log của **mọi pod được chọn**. Mỗi dòng có tiền tố `tên-pod │`, và mỗi pod có một màu cố định. Danh sách pod luôn được cập nhật:
+- pod mới (ví dụ khi rollout) tự được mở stream khi container của nó đã chạy;
+- pod bị xóa thì stream của nó bị hủy;
+- container restart thì stream được mở lại.
+
+Search, wrap, follow, `t` và `p` vẫn hoạt động như ở log một pod.
+
+### Học được gì
+- **Fan-in:** gom N channel vào 1 channel, mỗi nguồn một goroutine chuyển tiếp. Đây là pattern kinh điển của Go concurrency.
+- **Đóng an toàn khi số producer thay đổi:** `Add` có thể được gọi bất cứ lúc nào, nên `WaitGroup.Add` phải được giữ dưới cùng một mutex với cờ `closed`. Nếu không, `Close` có thể bắt đầu `Wait` trước khi một producer mới kịp được đếm, rồi đóng channel trong khi producer đó vẫn gửi.
+- **Cây context:** context của view → context của từng pod. Hủy context cha là toàn bộ stream dừng theo; hủy context của một pod chỉ dừng stream đó.
+- **Đồng bộ trạng thái với một watch:** dùng chính `WatchResources` (với label selector của deployment) để biết pod nào đang tồn tại và đã sẵn sàng cho log.
+- **Dữ liệu thuần, trình bày lúc render** (giống phase 2.6): buffer lưu text thuần `pod │ text`; màu chỉ được thêm khi vẽ, nên search và đo độ rộng không bị ảnh hưởng.
+
+### Thể hiện trong code
+
+**Package `internal/logmux`** (không import Bubble Tea hay client-go):
+
+```go
+func (m *Mux) Add(source string, lines <-chan string, errs <-chan error)  // không bao giờ block
+func (m *Mux) Lines() <-chan Line   // Line{Source, Text} hoặc Line{Source, Ended: true, Err}
+func (m *Mux) Close()               // hủy → chờ mọi forwarder → close(out)
+```
+
+- Mỗi `Add` chạy một goroutine forwarder: đọc `lines`, gắn `Source`, rồi gửi qua `send` (có `select` trên `ctx.Done()`, nên không bao giờ kẹt khi Mux đang dừng). Khi `lines` đóng, forwarder gửi `Line{Ended: true}`, kèm lỗi nếu có (đọc từ `errs` mà không chờ, giống `waitForLogLines`).
+- `Add` giữ `mu` trong lúc kiểm tra `closed` và gọi `wg.Add(1)`; `Close` đặt `closed = true` dưới cùng mutex đó. Nhờ vậy `wg.Wait()` trong `Close` không thể bỏ sót một forwarder. Gọi `Add` sau khi đã `Close` thì không làm gì.
+- `Close` dùng lại đúng thứ tự đã quen: `cancel()` → (trong goroutine) `wg.Wait()` → `close(out)`, giống `ResourceWatch.Stop` ở phase (c).
+- Hủy context truyền vào `New` cũng có tác dụng như `Close`.
+
+**State của view** (`internal/ui/multilogs.go` → `multiLogs`, nằm trong `logsView.multi`; nil nghĩa là đang xem log một pod):
+- `watch`: pod watch theo selector;
+- `pods`: các pod đang tồn tại;
+- `streams map[pod]CancelFunc`: các pod đang có stream chạy;
+- `lastErr`: để không in lặp lại cùng một lỗi;
+- `subscribed`: đã có waiter trên mux hay chưa.
+
+**Luồng chạy:**
+
+```
+openMulti → restart() → restartMulti(ctx): mux mới, CheckAccess(logs, list pods, watch pods), WatchResources(Pods, ns, selector)
+logPodsWatchMsg   → lưu watch, waitForLogPods
+logPodEventsMsg   → Upserted: nếu chưa có stream và streamable(pod) → startPodStream (context con)
+                    Deleted : hủy stream của pod đó
+logPodStreamMsg   → mux.Add(pod, lines, errs); lần đầu tiên thì tạo waitForMuxLines
+logMuxLinesMsg    → push "pod │ text" vào ring buffer; Ended → xóa khỏi streams (lần update sau sẽ mở lại)
+```
+
+- `streamable` bỏ qua `Pending`, `ContainerCreating`, `PodInitializing`, `Init:*`, vì container chưa chạy thì chưa có log. Pod được mở stream khi một event update cho thấy nó đã chạy.
+- **Mở lại stream không cần timer:** stream kết thúc (container chết) thì pod bị xóa khỏi `streams`. Khi container restart, pod sẽ có event update, và event đó mở stream mới. Hoàn toàn dựa trên event, không poll.
+- **Waiter của mux được tạo khi stream đầu tiên được thêm**, không phải lúc mở view. Không có goroutine nào chờ trên một mux rỗng, và luôn chỉ có đúng một waiter (cờ `subscribed`).
+- `noteSource` ghi các dòng trạng thái (`— stream ended —`, `⚠ lỗi`), nhưng không ghi lại nếu trùng với dòng trước của cùng pod, để một pod CrashLoopBackOff không làm đầy màn hình.
+- `stop()` của `logsView` gọi `multi.stop()` (dừng pod watch) rồi `cancel()` (hủy mux và mọi stream). Rời view vẫn đi qua `setActive`, nên vẫn chỉ có **một chỗ** dọn dẹp.
+
+**Render** (`renderSource`, `sourceStyle`):
+- `strings.Cut(line, " │ ")` tách tên pod, tô màu tên bằng `sourceStyle(pod)`, rồi highlight phần text nếu dòng khớp search.
+- Màu được chọn bằng `fnv` hash của tên pod trên một palette 6 màu adaptive, nên cùng một pod luôn có cùng màu, kể cả sau khi mở lại view.
+
+**Phím `l`** (`resourcesView.allLogs`): trên deployment/service thì dùng `Resource.Selector`; trong bảng pods đã drill-down thì dùng `q.selector` và `q.scope`. Không có selector thì không làm gì, vì selector rỗng sẽ khớp mọi pod (cùng nguyên tắc với phase 2.4).
+
+### Test liên quan
+- `internal/logmux/logmux_test.go`:
+  - `TestMergesSourcesAndReportsEnds`: gộp hai nguồn; dòng `Ended` có lỗi và không có lỗi;
+  - `TestPerSourceOrderIsKept`;
+  - `TestCloseReleasesReaderAndBlockedForwarders`: forwarder đang block vì không ai đọc vẫn thoát được; `Close` gọi hai lần không sao; `Add` sau `Close` không panic;
+  - `TestContextCancelCloses`.
+- `internal/ui/root_test.go`:
+  - `TestAggregatedLogs`: watch đúng selector và namespace; tiền tố trong buffer; tiêu đề; pod `ContainerCreating` chưa được stream, sang `Running` thì được stream; pod bị xóa thì stream bị hủy; stream kết thúc thì được mở lại ở lần update sau; Esc hủy mọi thứ và dừng watch;
+  - `TestAggregatedLogsFromDrillDown`, `TestAggregatedLogsNeedSelector`, `TestRenderSource`.
+- Thủ công trên envtest: `:deploy` → `l` hiện `Logs deployments/web (2 pods, 0 streaming)`; patch `web-1` sang Running thì thấy `web-1 │ — stream ended —` (envtest không có kubelet nên body rỗng), và không có vòng lặp mở lại.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| `wg.Add` chạy đua với `wg.Wait` khi có producer mới trong lúc đang đóng | `wg.Add` và cờ `closed` dưới cùng mutex |
+| Đóng channel `out` khi forwarder còn gửi | `cancel` → `wg.Wait` → `close`, và mọi lần gửi đều `select` trên `ctx.Done()` |
+| Mở stream cho pod chưa chạy thì nhận lỗi ngay | `streamable` + đợi event update |
+| Pod crashloop in cùng một lỗi liên tục | `lastErr` |
+| Màu trong buffer làm search sai (escape code có thể khớp với từ khóa) | Lưu text thuần, tô màu lúc render |
+| Test harness bỏ Cmd sau 50ms, nên waiter bị bỏ "nuốt" mất dòng log | Waiter chỉ được tạo khi có stream đầu tiên; các sự kiện về sau được test đưa message vào trực tiếp (logmux có test riêng) |
+| Mở lại stream đọc lại 500 dòng cuối | Container mới thì đó là log mới; nếu stream đứt vì mạng thì có thể thấy dòng trùng (chấp nhận được, ghi chú lại) |
 
