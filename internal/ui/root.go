@@ -51,6 +51,7 @@ const (
 	viewNamespaces
 	viewLogs
 	viewDetail
+	viewTree
 )
 
 // resourceTypeResolvedMsg carries the result of a discovery lookup.
@@ -105,6 +106,10 @@ type Model struct {
 	resources  resourcesView
 	logs       logsView
 	detail     detailView
+	tree       treeView
+	// returnTo is where esc leads from logs/detail: the table or the tree
+	// they were opened from.
+	returnTo viewID
 
 	commandMode bool
 	command     textinput.Model
@@ -135,6 +140,7 @@ func New(newClient ClientFactory, opts Options) Model {
 		resources:  newResourcesView(),
 		logs:       newLogsView(),
 		detail:     newDetailView(),
+		tree:       newTreeView(),
 		command:    ti,
 		help:       help.New(),
 		status:     "connecting…",
@@ -196,21 +202,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.switchNamespace(msg.namespace)
 
 	case openLogsMsg:
+		m.rememberReturn()
 		cmd := m.logs.open(m.client, msg.pod)
 		m.setActive(viewLogs)
 		return m, cmd
 
 	case openMultiLogsMsg:
+		m.rememberReturn()
 		cmd := m.logs.openMulti(m.client, msg.title, msg.namespace, msg.selector)
 		m.setActive(viewLogs)
 		return m, cmd
 
+	case openTreeMsg:
+		cmd := m.tree.open(m.client, msg.rt, msg.resource)
+		m.setActive(viewTree)
+		return m, cmd
+
 	case openDescribeMsg:
+		m.rememberReturn()
 		cmd := m.detail.openDescribe(m.client, msg.pod)
 		m.setActive(viewDetail)
 		return m, cmd
 
 	case openYAMLMsg:
+		m.rememberReturn()
 		cmd := m.detail.openYAML(m.client, msg.rt, msg.resource)
 		m.setActive(viewDetail)
 		return m, cmd
@@ -226,10 +241,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.showResources(msg.rt)
 
 	case backMsg:
-		if m.active == viewResources {
+		switch {
+		case m.active == viewResources:
 			return m.popNav()
-		}
-		if m.client != nil {
+		case m.active == viewLogs || m.active == viewDetail:
+			m.setActive(m.returnTo)
+		case m.client != nil:
 			m.setActive(viewResources)
 		}
 		return m, nil
@@ -254,6 +271,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		logPodsWatchMsg, logPodEventsMsg, logPodStreamMsg, logMuxLinesMsg:
 		var cmd tea.Cmd
 		m.logs, cmd = m.logs.Update(msg)
+		return m, cmd
+
+	case treeLoadedMsg:
+		var cmd tea.Cmd
+		m.tree, cmd = m.tree.Update(msg)
 		return m, cmd
 
 	case detailLoadedMsg:
@@ -454,6 +476,15 @@ func (m Model) showResources(rt *k8s.ResourceType) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// rememberReturn records where esc should lead back to from logs/detail.
+func (m *Model) rememberReturn() {
+	if m.active == viewTree {
+		m.returnTo = viewTree
+	} else {
+		m.returnTo = viewResources
+	}
+}
+
 // drillDown shows the pods selected by a deployment or service, and
 // remembers the current table so esc can come back to it.
 func (m Model) drillDown(msg drillDownMsg) (tea.Model, tea.Cmd) {
@@ -518,6 +549,8 @@ func (m Model) updateActive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logs, cmd = m.logs.Update(msg)
 	case viewDetail:
 		m.detail, cmd = m.detail.Update(msg)
+	case viewTree:
+		m.tree, cmd = m.tree.Update(msg)
 	}
 	return m, cmd
 }
@@ -534,6 +567,8 @@ func (m Model) activeCapturingInput() bool {
 		return m.logs.capturingInput()
 	case viewDetail:
 		return m.detail.capturingInput()
+	case viewTree:
+		return m.tree.capturingInput()
 	}
 	return false
 }
@@ -550,6 +585,8 @@ func (m Model) activeKeys() helpKeys {
 		return helpKeys{view: m.logs.keys()}
 	case viewDetail:
 		return helpKeys{view: m.detail.keys()}
+	case viewTree:
+		return helpKeys{view: m.tree.keys()}
 	}
 	return helpKeys{}
 }
@@ -568,6 +605,7 @@ func (m *Model) layout() {
 	m.resources.SetSize(m.width, h)
 	m.logs.SetSize(m.width, h)
 	m.detail.SetSize(m.width, h)
+	m.tree.SetSize(m.width, h)
 }
 
 func (m Model) View() string {
@@ -587,6 +625,8 @@ func (m Model) View() string {
 		body = m.logs.View()
 	case viewDetail:
 		body = m.detail.View()
+	case viewTree:
+		body = m.tree.View()
 	}
 
 	// Pin the body height so the status and help bars stay at the bottom.

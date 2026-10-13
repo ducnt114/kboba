@@ -67,6 +67,7 @@ func (c *client) ResolveResourceType(ctx context.Context, name string) (*Resourc
 		gvr:        gvr,
 		dynamic:    true,
 		get:        getUnstructured(gvr),
+		list:       listUnstructured(gvr),
 		convert:    unstructuredResource(columns),
 	}
 	for _, pc := range columns {
@@ -193,5 +194,15 @@ func unstructuredResource(columns []printerColumn) func(any) (Resource, bool) {
 func getUnstructured(gvr schema.GroupVersionResource) func(context.Context, *client, string, string) (runtime.Object, error) {
 	return func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 		return c.dynamic.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	}
+}
+
+func listUnstructured(gvr schema.GroupVersionResource) func(context.Context, *client, string, metav1.ListOptions) ([]runtime.Object, error) {
+	return func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+		l, err := c.dynamic.Resource(gvr).Namespace(ns).List(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+		return objects(l.Items), nil
 	}
 }

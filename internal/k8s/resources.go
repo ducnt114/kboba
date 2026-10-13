@@ -38,6 +38,17 @@ type Resource struct {
 	// targets (deployments, services), e.g. "app=web". Empty means none:
 	// it must never be used to list pods, as it would match all of them.
 	Selector string
+	// UID and Owners (metadata.ownerReferences) link objects into trees:
+	// a Pod is owned by a ReplicaSet, which is owned by a Deployment.
+	UID    string
+	Owners []OwnerRef
+}
+
+// OwnerRef is one entry of metadata.ownerReferences.
+type OwnerRef struct {
+	Kind string
+	Name string
+	UID  string
 }
 
 // Key uniquely identifies a resource of one type.
@@ -59,6 +70,7 @@ type ResourceType struct {
 	gvr     schema.GroupVersionResource
 	convert func(obj any) (Resource, bool)
 	get     func(ctx context.Context, c *client, namespace, name string) (runtime.Object, error)
+	list    func(ctx context.Context, c *client, namespace string, opts metav1.ListOptions) ([]runtime.Object, error)
 	// dynamic types come from discovery (ResolveResourceType) and are
 	// watched as unstructured objects through the dynamic client.
 	dynamic bool
@@ -74,6 +86,13 @@ var (
 		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 			return c.clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.CoreV1().Pods(ns).List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
+		},
 	}
 	Deployments = &ResourceType{
 		Name: "deployments", Title: "Deployments", Aliases: []string{"deployment", "deploy", "dp"}, Namespaced: true,
@@ -83,6 +102,30 @@ var (
 		convert: typed(deploymentResource),
 		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 			return c.clientset.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.AppsV1().Deployments(ns).List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
+		},
+	}
+	ReplicaSets = &ResourceType{
+		Name: "replicasets", Title: "ReplicaSets", Aliases: []string{"replicaset", "rs"}, Namespaced: true,
+		Columns: []Column{{"NAME", 0}, {"DESIRED", 8}, {"CURRENT", 8}, {"READY", 8}},
+		kind:    "ReplicaSet",
+		gvr:     appsv1.SchemeGroupVersion.WithResource("replicasets"),
+		convert: typed(replicaSetResource),
+		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
+			return c.clientset.AppsV1().ReplicaSets(ns).Get(ctx, name, metav1.GetOptions{})
+		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.AppsV1().ReplicaSets(ns).List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
 		},
 	}
 	Services = &ResourceType{
@@ -94,6 +137,13 @@ var (
 		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 			return c.clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
 		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.CoreV1().Services(ns).List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
+		},
 	}
 	Events = &ResourceType{
 		Name: "events", Title: "Events", Aliases: []string{"event", "ev"}, Namespaced: true,
@@ -103,6 +153,13 @@ var (
 		convert: typed(eventResource),
 		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 			return c.clientset.CoreV1().Events(ns).Get(ctx, name, metav1.GetOptions{})
+		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.CoreV1().Events(ns).List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
 		},
 	}
 	Nodes = &ResourceType{
@@ -114,12 +171,19 @@ var (
 		get: func(ctx context.Context, c *client, ns, name string) (runtime.Object, error) {
 			return c.clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
 		},
+		list: func(ctx context.Context, c *client, ns string, o metav1.ListOptions) ([]runtime.Object, error) {
+			l, err := c.clientset.CoreV1().Nodes().List(ctx, o)
+			if err != nil {
+				return nil, err
+			}
+			return objects(l.Items), nil
+		},
 	}
 )
 
 // ResourceTypes lists every resource type kboba knows.
 func ResourceTypes() []*ResourceType {
-	return []*ResourceType{Pods, Deployments, Services, Events, Nodes}
+	return []*ResourceType{Pods, Deployments, ReplicaSets, Services, Events, Nodes}
 }
 
 // LookupResourceType finds a type by name or alias.
@@ -148,8 +212,28 @@ func typed[T any](f func(T) Resource) func(any) (Resource, bool) {
 	}
 }
 
+// objects turns a list's Items ([]corev1.Pod, ...) into runtime.Objects.
+// The type parameters say: T is a struct type and *T implements
+// runtime.Object, which is how client-go's API types are shaped.
+func objects[T any, PT interface {
+	*T
+	runtime.Object
+}](items []T) []runtime.Object {
+	out := make([]runtime.Object, len(items))
+	for i := range items {
+		out[i] = PT(&items[i])
+	}
+	return out
+}
+
 func newResource(m metav1.Object, cells ...string) Resource {
+	var owners []OwnerRef
+	for _, o := range m.GetOwnerReferences() {
+		owners = append(owners, OwnerRef{Kind: o.Kind, Name: o.Name, UID: string(o.UID)})
+	}
 	return Resource{
+		UID:       string(m.GetUID()),
+		Owners:    owners,
 		Namespace: m.GetNamespace(),
 		Name:      m.GetName(),
 		Created:   m.GetCreationTimestamp().Time,
@@ -177,6 +261,19 @@ func deploymentResource(d *appsv1.Deployment) Resource {
 	)
 	// matchLabels and matchExpressions → "app=web,tier in (a,b)".
 	if sel, err := metav1.LabelSelectorAsSelector(d.Spec.Selector); err == nil && !sel.Empty() {
+		r.Selector = sel.String()
+	}
+	return r
+}
+
+func replicaSetResource(rs *appsv1.ReplicaSet) Resource {
+	desired := int32(1)
+	if rs.Spec.Replicas != nil {
+		desired = *rs.Spec.Replicas
+	}
+	r := newResource(rs, rs.Name,
+		fmt.Sprint(desired), fmt.Sprint(rs.Status.Replicas), fmt.Sprint(rs.Status.ReadyReplicas))
+	if sel, err := metav1.LabelSelectorAsSelector(rs.Spec.Selector); err == nil && !sel.Empty() {
 		r.Selector = sel.String()
 	}
 	return r

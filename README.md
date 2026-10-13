@@ -23,6 +23,8 @@ phase-by-phase walkthrough of how and why it is built this way.
   kind or `plural.group`) is resolved through API discovery and watched with
   the dynamic client; CRDs show their `additionalPrinterColumns`. Secret
   values are redacted in the YAML view.
+- **Ownership tree** (`x`): Deployment → ReplicaSets → Pods, a Service's
+  Pods, or a Pod's owners, linked by `ownerReferences` UIDs.
 - **Drill-down**: from a deployment or service to its pods, `esc` to go
   back to where you were.
 - **Logs**: follow a container's logs, search with highlighting, wrap,
@@ -85,6 +87,7 @@ kubeconfig.
 |             | `esc`          | back to the previous table (after drill-down) |
 |             | `s`, `S`       | sort by next column, reverse order   |
 |             | `y`            | YAML of the selected object          |
+|             | `x`            | ownership tree of the selected object |
 | deploy, svc | `enter`        | pods selected by the object (drill-down) |
 |             | `l`            | logs of all selected pods            |
 | pods        | `enter`        | logs of the selected pod             |
@@ -99,7 +102,7 @@ kubeconfig.
 | describe, yaml | `r`         | refresh                              |
 | yaml        | `←/→`          | scroll horizontally                  |
 
-Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:svc`, `:events` (`:ev`),
+Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:rs`, `:svc`, `:events` (`:ev`),
 `:nodes` (`:no`), any other resource type (`:cm`, `:ingresses`,
 `:certificates.cert-manager.io`, ...), `:ctx [name]`, `:ns [name|all]`, `:q`.
 

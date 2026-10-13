@@ -33,7 +33,8 @@ type fakeClient struct {
 	usage      map[string]k8s.Usage
 	metricsErr error
 	metricCall int
-	denied     map[string]bool // Access.String() values CanI refuses
+	denied     map[string]bool   // Access.String() values CanI refuses
+	podOwners  map[string]string // pod name → owning ReplicaSet UID
 }
 
 // fakeStream records a StreamLogs call; ctx tells whether it was cancelled.
@@ -90,7 +91,7 @@ func (f *fakeClient) WatchResources(rt *k8s.ResourceType, ns, selector string) (
 		pods, _ := f.ListPods(context.Background(), ns)
 		for _, p := range pods {
 			if sel.Matches(f.podLabels[p.Name]) {
-				items = append(items, k8s.Resource{Namespace: p.Namespace, Name: p.Name, Cells: make([]string, len(rt.Columns)), Pod: &p})
+				items = append(items, f.podResource(p))
 			}
 		}
 	}
@@ -175,6 +176,41 @@ func (f *fakeClient) CanI(_ context.Context, a k8s.Access) (k8s.Decision, error)
 	return k8s.Decision{Allowed: true}, nil
 }
 
+// ListResources serves a snapshot: pods (with UID "uid-<name>" and owner
+// from podOwners) and the "others" fixtures, filtered by namespace.
+func (f *fakeClient) ListResources(_ context.Context, rt *k8s.ResourceType, ns, selector string) ([]k8s.Resource, error) {
+	sel, err := labels.Parse(selector)
+	if err != nil {
+		return nil, err
+	}
+	var out []k8s.Resource
+	if rt == k8s.Pods {
+		for _, p := range f.pods {
+			if (ns != "" && p.Namespace != ns) || !sel.Matches(f.podLabels[p.Name]) {
+				continue
+			}
+			out = append(out, f.podResource(p))
+		}
+		return out, nil
+	}
+	for _, r := range f.others[rt.Name] {
+		if ns == "" || r.Namespace == ns {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// podResource is a pod as the informer or a list would deliver it.
+func (f *fakeClient) podResource(p k8s.PodInfo) k8s.Resource {
+	r := k8s.Resource{Namespace: p.Namespace, Name: p.Name, UID: "uid-" + p.Name,
+		Cells: make([]string, len(k8s.Pods.Columns)), Pod: &p}
+	if owner, ok := f.podOwners[p.Name]; ok {
+		r.Owners = []k8s.OwnerRef{{Kind: "ReplicaSet", UID: owner}}
+	}
+	return r
+}
+
 func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 	return func(name string) (k8s.Client, error) {
 		if name == "" {
@@ -192,14 +228,22 @@ func fakeFactory(contexts ...k8s.ContextInfo) ClientFactory {
 			usage: map[string]k8s.Usage{
 				"team-a/api": {CPUMilli: 250, MemoryBytes: 64 << 20},
 			},
+			podOwners: map[string]string{"api": "rs-api"},
 			podLabels: map[string]labels.Set{
 				"api":    {"app": "api"},
 				"worker": {"app": "worker"},
 				"web":    {"app": "web"},
 			},
 			others: map[string][]k8s.Resource{
+				"replicasets": {
+					{Namespace: "team-a", Name: "api-rs", UID: "rs-api", Cells: []string{"api-rs", "1", "1", "1"}, Selector: "app=api",
+						Owners: []k8s.OwnerRef{{Kind: "Deployment", UID: "d-api"}}},
+				},
+				"services": {
+					{Namespace: "default", Name: "web", Cells: []string{"web", "ClusterIP"}, Selector: "app=web"},
+				},
 				"deployments": {
-					{Namespace: "team-a", Name: "api", Cells: []string{"api", "1/1", "1", "1"}, Selector: "app=api"},
+					{Namespace: "team-a", Name: "api", UID: "d-api", Cells: []string{"api", "1/1", "1", "1"}, Selector: "app=api"},
 					{Namespace: "team-a", Name: "legacy", Cells: []string{"legacy", "0/0", "0", "0"}}, // no selector
 					{Namespace: "team-a", Name: "worker", Cells: []string{"worker", "1/1", "1", "1"}, Selector: "app=worker"},
 				},
@@ -1170,5 +1214,106 @@ func TestRenderSource(t *testing.T) {
 	}
 	if sourceStyle("web-1").GetForeground() != sourceStyle("web-1").GetForeground() {
 		t.Fatal("a pod must always get the same colour")
+	}
+}
+
+func TestFlattenTree(t *testing.T) {
+	n := func(name string, children ...*k8s.TreeNode) *k8s.TreeNode {
+		return &k8s.TreeNode{Type: k8s.Pods, Resource: k8s.Resource{Name: name}, Children: children}
+	}
+	root := n("deploy", n("rs-new", n("pod-a"), n("pod-b")), n("rs-old", n("pod-c")))
+
+	var got []string
+	for _, r := range flattenTree(root) {
+		got = append(got, r.prefix+r.node.Resource.Name)
+	}
+	want := []string{
+		"deploy",
+		"├─ rs-new",
+		"│  ├─ pod-a",
+		"│  └─ pod-b",
+		"└─ rs-old",
+		"   └─ pod-c",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func treeNames(m Model) []string {
+	var out []string
+	for _, r := range m.tree.table.rows {
+		out = append(out, r[0])
+	}
+	return out
+}
+
+func TestDeploymentTree(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("x")) // team-a/api
+
+	if m.active != viewTree {
+		t.Fatalf("active = %v", m.active)
+	}
+	want := []string{"Deployments/api", "└─ ReplicaSets/api-rs", "   └─ Pods/api"}
+	if got := treeNames(m); !slices.Equal(got, want) {
+		t.Fatalf("tree = %q", got)
+	}
+
+	// Open the pod's logs from the tree; esc comes back to the tree.
+	m = send(t, m, press("j"))
+	m = send(t, m, press("j"))
+	m = send(t, m, press("enter"))
+	if m.active != viewLogs || m.logs.pod.Name != "api" {
+		t.Fatalf("active=%v pod=%q", m.active, m.logs.pod.Name)
+	}
+	m = send(t, m, press("esc"))
+	if m.active != viewTree {
+		t.Fatalf("esc from logs should return to the tree, got %v", m.active)
+	}
+	// And esc again back to the table it came from.
+	m = send(t, m, press("esc"))
+	if m.active != viewResources || m.resources.q.rt != k8s.Deployments {
+		t.Fatalf("active=%v rt=%s", m.active, m.resources.q.rt.Name)
+	}
+}
+
+func TestPodAncestorsTree(t *testing.T) {
+	m := startModel(t, Options{})
+	m = send(t, m, press("x")) // pods table, first row team-a/api
+	want := []string{"Deployments/api", "└─ ReplicaSets/api-rs", "   └─ Pods/api"}
+	if got := treeNames(m); !slices.Equal(got, want) {
+		t.Fatalf("tree = %q", got)
+	}
+}
+
+func TestServiceTree(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "ns default")
+	m = typeCommand(t, m, "svc")
+	m = send(t, m, press("x"))
+	want := []string{"Services/web", "└─ Pods/web"}
+	if got := treeNames(m); !slices.Equal(got, want) {
+		t.Fatalf("tree = %q", got)
+	}
+	// YAML from the tree, then back to it.
+	m = send(t, m, press("y"))
+	if m.active != viewDetail {
+		t.Fatalf("active = %v", m.active)
+	}
+	m = send(t, m, press("esc"))
+	if m.active != viewTree {
+		t.Fatalf("esc from yaml should return to the tree, got %v", m.active)
+	}
+}
+
+func TestTreeLateResultIgnored(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "deploy")
+	m = send(t, m, press("x"))
+	m = send(t, m, treeLoadedMsg{id: "services:default/web", root: &k8s.TreeNode{Type: k8s.Services}})
+	if got := treeNames(m); len(got) != 3 {
+		t.Fatalf("late result for another object replaced the tree: %q", got)
 	}
 }

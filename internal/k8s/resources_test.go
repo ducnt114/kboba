@@ -96,6 +96,7 @@ func TestEveryTypeHasMatchingCells(t *testing.T) {
 	objs := map[*ResourceType]any{
 		Pods:        pod("a", "p"),
 		Deployments: &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "d"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}},
+		ReplicaSets: &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs"}},
 		Services:    &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "s"}},
 		Events:      &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "e"}},
 		Nodes:       &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n"}},

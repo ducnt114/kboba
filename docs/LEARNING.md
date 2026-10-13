@@ -34,6 +34,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 **Phase 3**
 
 22. [Phase 3.1: Logs gộp của nhiều pod](#22-phase-31-logs-gộp-của-nhiều-pod)
+23. [Phase 3.2: Cây quan hệ ownerReferences](#23-phase-32-cây-quan-hệ-ownerreferences)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -1381,7 +1382,7 @@ Ngoại lệ chỉ nằm ở **một chỗ**, có tên, có comment giải thíc
 | Phase | Tính năng | Học được gì | Trạng thái |
 |---|---|---|---|
 | 3.1 | Logs gộp của nhiều pod (giống `stern`) | Gộp channel (fan-in), quản lý nhiều stream có vòng đời riêng | ✅ [mục 22](#22-phase-31-logs-gộp-của-nhiều-pod) |
-| 3.2 | Cây quan hệ ownerReferences | Dựng đồ thị từ nhiều danh sách, render dạng cây | ⏳ |
+| 3.2 | Cây quan hệ ownerReferences | Dựng đồ thị từ nhiều danh sách, render dạng cây | ✅ [mục 23](#23-phase-32-cây-quan-hệ-ownerreferences) |
 | 3.3 | Describe generic + events cho mọi object | `unstructured` từ typed object, field selector theo UID | ⏳ |
 | 3.4 | Gợi ý và lịch sử cho lệnh `:` | Suggestions của bubbles `textinput`, lưu lịch sử | ⏳ |
 
@@ -1468,4 +1469,96 @@ logMuxLinesMsg    → push "pod │ text" vào ring buffer; Ended → xóa khỏ
 | Màu trong buffer làm search sai (escape code có thể khớp với từ khóa) | Lưu text thuần, tô màu lúc render |
 | Test harness bỏ Cmd sau 50ms, nên waiter bị bỏ "nuốt" mất dòng log | Waiter chỉ được tạo khi có stream đầu tiên; các sự kiện về sau được test đưa message vào trực tiếp (logmux có test riêng) |
 | Mở lại stream đọc lại 500 dòng cuối | Container mới thì đó là log mới; nếu stream đứt vì mạng thì có thể thấy dòng trùng (chấp nhận được, ghi chú lại) |
+
+## 23. Phase 3.2: Cây quan hệ ownerReferences
+
+### Mục tiêu
+Phím `x` trên bất kỳ dòng nào sẽ mở cây quan hệ (giống `xray` của k9s):
+
+```
+Deployments/web                ready 0/2
+└─ ReplicaSets/web-7f9c        ready 0/2
+   ├─ Pods/web-1               Running
+   └─ Pods/web-2               Pending
+```
+
+- Deployment → ReplicaSet → Pod; ReplicaSet/StatefulSet/DaemonSet/Job/CRD… → các Pod nó sở hữu; Service → các Pod nó *chọn*.
+- Trên một Pod, cây đi **ngược lên**: Deployment → ReplicaSet → chính pod đó.
+- Từ cây có thể mở logs (`enter`), describe (`d`), YAML (`y`), logs gộp (`l`). Esc từ các view đó quay về **cây**, không phải bảng.
+
+Phase này cũng thêm view built-in `:rs` (ReplicaSets).
+
+### Học được gì
+- **ownerReferences:** cách Kubernetes ghi lại "ai tạo ra ai". Garbage collector dựa vào nó để xóa theo dây chuyền. Liên kết đi theo **UID**, không theo tên: một ReplicaSet có thể bị xóa rồi tạo lại với cùng tên, nhưng UID thì luôn mới.
+- **Sở hữu khác với chọn:** Deployment *sở hữu* ReplicaSet và ReplicaSet *sở hữu* Pod (ownerReferences), còn Service chỉ *chọn* Pod bằng label. Hai quan hệ này được dựng theo hai cách khác nhau.
+- **Nguồn sự thật:** smoke test cho thấy lọc ReplicaSet bằng selector của Deployment là sai khi ReplicaSet không mang label đó. Label chỉ là quy ước; ownerReferences mới là sự thật.
+- **Generics với ràng buộc kiểu con trỏ:** gom `[]corev1.Pod` thành `[]runtime.Object` bằng một hàm duy nhất cho mọi kiểu.
+- **Dùng lại component:** cây được hiển thị bằng chính `tableModel` của phase 2.6. Chỉ cần "làm phẳng" cây thành các dòng có tiền tố `├─ │ └─`.
+- **Điều hướng "quay về nơi đã đến":** Esc không luôn về bảng nữa, mà về view đã mở ra nó.
+
+### Thể hiện trong code
+
+**Dữ liệu** (`internal/k8s/resources.go`): `Resource` có thêm `UID` và `Owners []OwnerRef{Kind, Name, UID}`, được điền trong `newResource` từ `metav1.Object`. Vì vậy mọi loại resource (kể cả dynamic) đều có sẵn hai trường này.
+
+**Snapshot** (`internal/k8s/tree.go` → `ListResources(ctx, rt, ns, selector)`): cây không cần live, nên chỉ cần list một lần, và `r` để làm mới. Mỗi `ResourceType` có thêm closure `list`. Với resource dynamic thì dùng `listUnstructured`. Cả hai đều đi qua helper generic:
+
+```go
+func objects[T any, PT interface {
+    *T
+    runtime.Object
+}](items []T) []runtime.Object {
+    out := make([]runtime.Object, len(items))
+    for i := range items {
+        out[i] = PT(&items[i])   // &items[i]: con trỏ tới phần tử trong slice, không copy
+    }
+    return out
+}
+```
+
+Ràng buộc `PT interface{ *T; runtime.Object }` nghĩa là "PT là `*T`, và `*T` implement `runtime.Object`". Đây đúng là hình dạng của các API type trong client-go (`*corev1.Pod` implement `runtime.Object`, còn `corev1.Pod` thì không). Go suy ra `T` từ tham số; `PT` cũng được suy ra nhờ ràng buộc. Lời gọi chỉ đơn giản là `objects(l.Items)`.
+
+**Ghép cây** (`OwnerTree(rootType, root, levels...)`): đây là hàm thuần. Mỗi `Level{Type, Items}` là ứng viên cho một tầng. Với mỗi tầng: lập `map[UID]node` của tầng cha, rồi gắn từng item vào cha đầu tiên mà UID khớp với một trong các owner của nó. Item không khớp với cha nào (không có owner, hoặc owner nằm ngoài cây) thì bị bỏ qua.
+
+**Lấy dữ liệu cho từng loại** (`internal/ui/tree.go` → `buildTree`, chạy trong Cmd):
+
+| Gốc | Dữ liệu cần lấy | Cách ghép |
+|---|---|---|
+| Deployment | **mọi** ReplicaSet trong namespace + Pod theo selector | `OwnerTree` 2 tầng |
+| Service | Pod theo selector | gắn trực tiếp (quan hệ "chọn") |
+| Pod | ReplicaSets, rồi Deployments, đi ngược theo `Owners[0]` | `podAncestors` dựng chuỗi rồi đảo ngược thành cây |
+| Loại namespaced khác | Pod (theo selector nếu có) | `OwnerTree` 1 tầng |
+
+`podAncestors` dừng lại ở owner không phải view built-in (ví dụ StatefulSet) hoặc owner đã bị xóa, thay vì báo lỗi.
+
+**Hiển thị** (`flattenTree` + `treeView`):
+- `flattenTree` duyệt theo chiều sâu (DFS), mỗi tầng mang theo chuỗi thụt lề: con cuối cùng dùng `└─ ` và thụt `"   "`, các con khác dùng `├─ ` và thụt `"│  "`.
+- Các dòng được đưa vào `tableModel` với 3 cột NAME/STATUS/AGE. `nodeStatus` lấy trạng thái phù hợp theo loại (pod: STATUS; deployment/RS: `ready a/b`; service: TYPE). Màu dùng lại `rowHealth`; `rowHealth` có thêm trường hợp ReplicaSets (READY < DESIRED thì vàng).
+- `treeLoadedMsg.id` chặn kết quả trễ, giống `detailLoadedMsg`.
+
+**Quay về đúng nơi** (`Model.returnTo`, `rememberReturn`): khi mở logs, logs gộp, describe hoặc YAML, root ghi nhớ view hiện tại (bảng hay cây). `backMsg` từ logs hoặc detail sẽ về `returnTo`; từ cây thì về bảng.
+
+### Test liên quan
+- `internal/k8s/tree_test.go`:
+  - `TestListResources`: lọc theo selector, sắp xếp, có `UID`/`Owners`; nodes bỏ qua namespace;
+  - `TestListResourcesDynamic`;
+  - `TestOwnerTree`: hai ReplicaSet với pod của từng cái; pod không có owner và pod có owner ngoài cây đều bị bỏ;
+  - `TestReplicaSetCells`.
+- `readonly_test.go`: `ListResources` có trong allowlist và được gọi cho mọi type.
+- `internal/ui/root_test.go`:
+  - `TestFlattenTree`: hình dạng các nhánh;
+  - `TestDeploymentTree`: 3 tầng; Enter trên pod mở logs, Esc về cây, Esc tiếp về bảng deployments;
+  - `TestPodAncestorsTree`;
+  - `TestServiceTree`: YAML mở từ cây, Esc về cây;
+  - `TestTreeLateResultIgnored`.
+- Thủ công trên envtest: ReplicaSet tạo tay **không có label**, pod được gắn ownerReferences; `x` trên deployment `web` và trên pod `web-1` cho ra đúng các cây như trên.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| Lọc ReplicaSet bằng label selector của Deployment bỏ sót RS không mang label | List mọi RS trong namespace, ghép theo UID |
+| Ghép theo tên khiến object cùng tên đã bị xóa và tạo lại bị nhận nhầm | Ghép theo UID |
+| Coi Service là owner của Pod | Gắn theo selector, như một quan hệ riêng |
+| Esc từ logs mở từ cây lại nhảy về bảng | `returnTo` |
+| Fake client bỏ sót `Owners` cho pod từ watch, nên test cây ngược thất bại | Dùng một helper `podResource` chung cho watch và list trong fake |
+| Binary cũ khi smoke test làm tưởng tính năng không chạy | Luôn `go build` lại trước khi test thủ công |
 

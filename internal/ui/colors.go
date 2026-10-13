@@ -70,6 +70,10 @@ func rowHealth(rt *k8s.ResourceType, r k8s.Resource) health {
 		if !allReady(cell(r, 1)) {
 			return pending
 		}
+	case k8s.ReplicaSets:
+		if !allReady(cell(r, 3) + "/" + cell(r, 1)) { // READY vs DESIRED
+			return pending
+		}
 	case k8s.Nodes:
 		return statusHealth(cell(r, 1))
 	case k8s.Events:

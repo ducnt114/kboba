@@ -25,6 +25,7 @@ var readOnlyMethods = []string{
 	"WatchResources",
 	"GetYAML",
 	"ListMetrics",
+	"ListResources",
 	"ResolveResourceType",
 	"GetPod",
 	"StreamLogs",
@@ -183,6 +184,9 @@ func TestClientOnlyReads(t *testing.T) {
 		// Not-found is fine: we only care about the verb that was used.
 		_, _ = c.GetYAML(ctx, rt, "default", "web")
 		_, _ = c.ListMetrics(ctx, rt, "default", "")
+		if _, err := c.ListResources(ctx, rt, "default", ""); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, a := range c.metrics.(*metricsfake.Clientset).Actions() {
 		if !isRead(a) {

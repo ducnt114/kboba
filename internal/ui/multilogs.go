@@ -36,7 +36,7 @@ type multiLogs struct {
 	// is issued when the first stream joins, so no goroutine waits on an
 	// empty mux; after that each batch re-subscribes.
 	subscribed bool
-	lastErr map[string]string             // to avoid repeating the same error line
+	lastErr    map[string]string // to avoid repeating the same error line
 }
 
 type (

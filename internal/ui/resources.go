@@ -339,6 +339,12 @@ func (v resourcesView) handleKey(msg tea.KeyMsg) (resourcesView, tea.Cmd) {
 		return v, goBack // the root model pops the navigation stack
 	case key.Matches(msg, resourceKeyMap.AllLogs):
 		return v, v.allLogs()
+	case key.Matches(msg, treeKeyMap.Tree):
+		if r, ok := v.selected(); ok {
+			rt := v.q.rt
+			return v, func() tea.Msg { return openTreeMsg{rt: rt, resource: r} }
+		}
+		return v, nil
 	case key.Matches(msg, resourceKeyMap.Drill) && v.q.rt != k8s.Pods:
 		if r, ok := v.selected(); ok && r.Selector != "" {
 			rt := v.q.rt
@@ -638,9 +644,10 @@ func (v resourcesView) keys() []key.Binding {
 	switch v.q.rt {
 	case k8s.Pods:
 		b = append(b, k.Logs, k.Describe)
-	case k8s.Deployments, k8s.Services:
+	case k8s.Deployments, k8s.ReplicaSets, k8s.Services:
 		b = append(b, k.Drill, k.AllLogs)
 	}
+	b = append(b, treeKeyMap.Tree)
 	if v.q.rt == k8s.Pods && v.q.selector != "" {
 		b = append(b, k.AllLogs)
 	}

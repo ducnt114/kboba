@@ -54,6 +54,10 @@ type Client interface {
 	// POST — see readOnlyTransport — but it changes nothing on the cluster.
 	CanI(ctx context.Context, a Access) (Decision, error)
 
+	// ListResources returns a one-off snapshot of rt's objects (for views
+	// that don't need to be live, such as the ownership tree).
+	ListResources(ctx context.Context, rt *ResourceType, namespace, labelSelector string) ([]Resource, error)
+
 	// GetYAML returns one object as YAML (without managedFields).
 	GetYAML(ctx context.Context, rt *ResourceType, namespace, name string) (string, error)
 
