@@ -40,13 +40,24 @@ type CommandHistory interface {
 	Save() error
 }
 
+// StartupDefault is the context and namespace kboba starts in, set with
+// ":default" and kept across runs. Like NamespaceMemory it is declared
+// where it is used.
+type StartupDefault interface {
+	Default() (context, namespace string, ok bool)
+	SetDefault(context, namespace string)
+	ClearDefault()
+	Save() error
+}
+
 // Options are the startup settings, usually from command-line flags.
 type Options struct {
-	Context   string // empty: kubeconfig current-context
-	Namespace string // empty: last used, else the context's default namespace
-	// Memory and History may be nil: nothing is remembered.
+	Context   string // empty: the ":default" context, else kubeconfig current-context
+	Namespace string // empty: the ":default" one, else last used, else the context's
+	// Memory, History and Default may be nil: nothing is remembered.
 	Memory  NamespaceMemory
 	History CommandHistory
+	Default StartupDefault
 	// StartupWarning is shown in the status bar once connected (e.g. the
 	// state file could not be read).
 	StartupWarning string
@@ -103,6 +114,10 @@ type Model struct {
 	client    k8s.Client
 	context   string
 	namespace string
+	// connectingToDefault is set while the first connection goes to the
+	// ":default" context, so that a context since removed from the
+	// kubeconfig falls back to current-context instead of blocking startup.
+	connectingToDefault bool
 
 	// nav is the drill-down history of the resources view (deployment →
 	// its pods, ...). esc pops it. Explicit navigation (":pods", ":ns",
@@ -146,14 +161,14 @@ type Model struct {
 func New(newClient ClientFactory, opts Options) Model {
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = "pods | deploy | svc | events | nodes | <any type> | ctx | ns | quit"
+	ti.Placeholder = "pods | deploy | svc | events | nodes | <any type> | ctx | ns | default | quit"
 	// Tab completes the suggestion shown after the cursor; ctrl+n/ctrl+p
 	// cycle suggestions. ↑/↓ are kept for history, like in a shell.
 	ti.ShowSuggestions = true
 	ti.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("ctrl+n"))
 	ti.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
 
-	return Model{
+	m := Model{
 		newClient:  newClient,
 		opts:       opts,
 		active:     viewResources,
@@ -167,10 +182,29 @@ func New(newClient ClientFactory, opts Options) Model {
 		help:       help.New(),
 		status:     "connecting…",
 	}
+	m.connectingToDefault = opts.Context == "" && m.startContext() != ""
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(connect(m.newClient, m.opts.Context), ageTick())
+	return tea.Batch(connect(m.newClient, m.startContext()), ageTick())
+}
+
+// startContext is the context to connect to first: --context, else the
+// ":default" one, else "" (the kubeconfig's current-context).
+func (m Model) startContext() string {
+	if m.opts.Context != "" {
+		return m.opts.Context
+	}
+	ctx, _, _ := m.startDefault()
+	return ctx
+}
+
+func (m Model) startDefault() (context, namespace string, ok bool) {
+	if m.opts.Default == nil {
+		return "", "", false
+	}
+	return m.opts.Default.Default()
 }
 
 // connect builds a client for contextName off the UI goroutine.
@@ -385,7 +419,7 @@ func (m Model) suggestions() []string {
 			add(h[i])
 		}
 	}
-	for _, c := range []string{"ctx", "ns", "ns all", "quit"} {
+	for _, c := range []string{"ctx", "ns", "ns all", "default", "default clear", "quit"} {
 		add(c)
 	}
 	types := m.typeNames
@@ -501,6 +535,8 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 			return m.switchNamespace(arg)
 		}
 		return m.showNamespaces()
+	case "default", "def":
+		return m.setDefault(arg)
 	case "q", "quit":
 		return m, tea.Quit
 	}
@@ -516,6 +552,17 @@ func (m Model) runCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil && m.connectingToDefault {
+		// The default context is gone (renamed, removed from the
+		// kubeconfig): start in current-context and say so.
+		m.connectingToDefault = false
+		def, _, _ := m.startDefault()
+		warn := fmt.Sprintf("default context %q: %v; using current-context (\":default clear\" forgets it)", def, msg.err)
+		if m.opts.StartupWarning == "" {
+			m.opts.StartupWarning = warn
+		}
+		return m, connect(m.newClient, "")
+	}
 	if msg.err != nil {
 		m.status, m.statusIsErr = msg.err.Error(), true
 		if msg.contexts == nil {
@@ -529,6 +576,8 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	firstConnect := m.client == nil
+	usedDefault := m.connectingToDefault
+	m.connectingToDefault = false
 	m.client = msg.client
 	m.context = msg.context.Name
 	m.contextNames = make([]string, 0, len(msg.contexts))
@@ -537,11 +586,15 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.typeNames, m.namespaceNames = nil, nil // belong to the previous context
 
-	// Precedence: --namespace (startup only) > remembered > context's > "default".
+	// Precedence: --namespace (startup only) > ":default" (startup, in its
+	// context only) > remembered > context's > "default".
+	defCtx, defNS, hasDefault := m.startDefault()
 	remembered, ok := m.lastNamespace(m.context)
 	switch {
 	case firstConnect && m.opts.Namespace != "":
 		m.namespace = m.opts.Namespace
+	case firstConnect && hasDefault && defCtx == m.context:
+		m.namespace = defNS
 	case ok:
 		m.namespace = remembered
 	case msg.context.Namespace != "":
@@ -552,16 +605,47 @@ func (m Model) handleClientReady(msg clientReadyMsg) (tea.Model, tea.Cmd) {
 	saveCmd := m.rememberNamespace()
 
 	m.status, m.statusIsErr = fmt.Sprintf("context %q", m.context), false
+	if usedDefault {
+		m.status = fmt.Sprintf("context %q (default)", m.context)
+	}
 	if firstConnect && m.opts.StartupWarning != "" {
 		m.status, m.statusIsErr, m.statusSticky = m.opts.StartupWarning, true, true
 	}
 	var cmd tea.Cmd
+	m.contexts.defaultName = defCtx
 	m.contexts, cmd = m.contexts.Update(contextsLoadedMsg{contexts: msg.contexts})
 	// start stops the previous context's informer before creating a new one.
 	m.nav = nil
 	watchCmd := m.resources.start(m.client, resourceQuery{rt: m.resources.q.rt, namespace: m.namespace}, "")
 	m.setActive(viewResources)
 	return m, tea.Batch(cmd, watchCmd, saveCmd, loadCompletions(m.client))
+}
+
+// setDefault makes the current context and namespace the ones kboba starts
+// in next time (arg ""), or forgets the default (arg "clear" or "-").
+func (m Model) setDefault(arg string) (tea.Model, tea.Cmd) {
+	def := m.opts.Default
+	switch {
+	case def == nil:
+		return m, reportErr(fmt.Errorf("no state file: the default can't be saved"))
+	case arg == "clear" || arg == "-":
+		def.ClearDefault()
+		m.status, m.statusIsErr = "default cleared: next start uses current-context", false
+	case arg != "":
+		return m, reportErr(fmt.Errorf("usage: :default [clear]"))
+	case m.client == nil:
+		return m, reportErr(fmt.Errorf("not connected: no context to make default"))
+	default:
+		def.SetDefault(m.context, m.namespace)
+		m.status, m.statusIsErr = fmt.Sprintf("default: ctx %s, ns %s", m.context, namespaceLabel(m.namespace)), false
+	}
+	m.contexts.defaultName, _, _ = def.Default()
+	return m, func() tea.Msg {
+		if err := def.Save(); err != nil {
+			return statusMsg{text: "save state: " + err.Error(), isErr: true}
+		}
+		return nil
+	}
 }
 
 func (m Model) lastNamespace(context string) (string, bool) {
@@ -787,11 +871,16 @@ func (m Model) View() string {
 	)
 }
 
-func (m Model) headerView() string {
-	ns := m.namespace
-	if ns == "" {
-		ns = "(all)"
+// namespaceLabel shows allNamespaces as "(all)".
+func namespaceLabel(ns string) string {
+	if ns == allNamespaces {
+		return "(all)"
 	}
+	return ns
+}
+
+func (m Model) headerView() string {
+	ns := namespaceLabel(m.namespace)
 	ctx := m.context
 	if ctx == "" {
 		ctx = "-"

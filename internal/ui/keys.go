@@ -51,6 +51,7 @@ func (h helpKeys) FullHelp() [][]key.Binding {
 		{
 			key.NewBinding(key.WithKeys(":ctx"), key.WithHelp(":ctx [name]", "contexts")),
 			key.NewBinding(key.WithKeys(":ns"), key.WithHelp(":ns [name]", "namespaces")),
+			key.NewBinding(key.WithKeys(":default"), key.WithHelp(":default [clear]", "start here next time")),
 		},
 		{
 			key.NewBinding(key.WithKeys(":pods"), key.WithHelp(":pods", "pods")),
