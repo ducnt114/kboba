@@ -1468,3 +1468,126 @@ func TestCommandHistory(t *testing.T) {
 		t.Fatalf("suggestions start with %v", s[:2])
 	}
 }
+
+// fakeDefault is an in-memory StartupDefault that counts saves.
+type fakeDefault struct {
+	mu      sync.Mutex
+	ctx, ns string
+	set     bool
+	saves   int
+}
+
+func (f *fakeDefault) Default() (string, string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ctx, f.ns, f.set
+}
+
+func (f *fakeDefault) SetDefault(ctx, ns string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ctx, f.ns, f.set = ctx, ns, true
+}
+
+func (f *fakeDefault) ClearDefault() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ctx, f.ns, f.set = "", "", false
+}
+
+func (f *fakeDefault) Save() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves++
+	return nil
+}
+
+func TestStartsInDefault(t *testing.T) {
+	def := &fakeDefault{ctx: "prod", ns: "monitoring", set: true}
+	// The default namespace beats the one remembered for that context.
+	mem := &fakeMemory{ns: map[string]string{"prod": "kube-system"}}
+	m := startModel(t, Options{Default: def, Memory: mem})
+	if m.context != "prod" || m.namespace != "monitoring" {
+		t.Fatalf("got ctx=%q ns=%q, want the default", m.context, m.namespace)
+	}
+
+	// Later switches use the remembered namespace as usual.
+	m = send(t, m, contextSelectedMsg{name: "dev"})
+	m = send(t, m, contextSelectedMsg{name: "prod"})
+	if m.namespace != "monitoring" { // remembered when we started there
+		t.Fatalf("back in prod: ns=%q", m.namespace)
+	}
+}
+
+func TestDefaultAllNamespaces(t *testing.T) {
+	def := &fakeDefault{ctx: "dev", ns: allNamespaces, set: true}
+	m := startModel(t, Options{Default: def})
+	if m.context != "dev" || m.namespace != allNamespaces {
+		t.Fatalf("got ctx=%q ns=%q", m.context, m.namespace)
+	}
+}
+
+func TestFlagsBeatDefault(t *testing.T) {
+	def := &fakeDefault{ctx: "prod", ns: "monitoring", set: true}
+	m := startModel(t, Options{Default: def, Context: "dev"})
+	if m.context != "dev" || m.namespace != "team-a" {
+		t.Fatalf("--context: got ctx=%q ns=%q", m.context, m.namespace)
+	}
+
+	m = startModel(t, Options{Default: def, Namespace: "flagged"})
+	if m.context != "prod" || m.namespace != "flagged" {
+		t.Fatalf("--namespace: got ctx=%q ns=%q", m.context, m.namespace)
+	}
+}
+
+func TestMissingDefaultContextFallsBack(t *testing.T) {
+	def := &fakeDefault{ctx: "gone", ns: "x", set: true}
+	m := startModel(t, Options{Default: def})
+	if m.context != "dev" || m.namespace != "team-a" {
+		t.Fatalf("got ctx=%q ns=%q, want current-context", m.context, m.namespace)
+	}
+	if !m.statusIsErr || !strings.Contains(m.status, `default context "gone"`) {
+		t.Fatalf("status = %q", m.status)
+	}
+	if m.active != viewResources {
+		t.Fatalf("active view = %v, want resources", m.active)
+	}
+}
+
+func TestSetAndClearDefault(t *testing.T) {
+	def := &fakeDefault{}
+	m := startModel(t, Options{Default: def})
+
+	m = typeCommand(t, m, "ns kube-system")
+	m = typeCommand(t, m, "default")
+	if ctx, ns, ok := def.Default(); !ok || ctx != "dev" || ns != "kube-system" || def.saves != 1 {
+		t.Fatalf("default = %q %q %v, saves %d", ctx, ns, ok, def.saves)
+	}
+	if m.status != "default: ctx dev, ns kube-system" {
+		t.Fatalf("status = %q", m.status)
+	}
+
+	// The contexts list marks it.
+	m = typeCommand(t, m, "ctx")
+	if title := m.contexts.list.Items()[0].(contextItem).Title(); title != "* dev  (default)" {
+		t.Fatalf("title = %q", title)
+	}
+
+	m = typeCommand(t, m, "default clear")
+	if _, _, ok := def.Default(); ok || def.saves != 2 {
+		t.Fatalf("not cleared (saves %d)", def.saves)
+	}
+
+	m = typeCommand(t, m, "default bogus")
+	if !m.statusIsErr {
+		t.Fatalf("bad argument should be an error: %q", m.status)
+	}
+}
+
+func TestDefaultWithoutStateFile(t *testing.T) {
+	m := startModel(t, Options{})
+	m = typeCommand(t, m, "default")
+	if !m.statusIsErr {
+		t.Fatalf("status = %q, want an error", m.status)
+	}
+}

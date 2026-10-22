@@ -21,6 +21,14 @@ type file struct {
 	Namespaces map[string]string `json:"namespaces,omitempty"`
 	// History holds the last ":" commands, oldest first.
 	History []string `json:"history,omitempty"`
+	// Default is the context and namespace kboba starts in, set with
+	// ":default". nil means "use the kubeconfig's current-context".
+	Default *startDefault `json:"default,omitempty"`
+}
+
+type startDefault struct {
+	Context   string `json:"context"`
+	Namespace string `json:"namespace"` // "" means "all namespaces"
 }
 
 // MaxHistory is how many commands are remembered.
@@ -81,6 +89,31 @@ func (s *Store) SetLastNamespace(context, namespace string) {
 		s.data.Namespaces = map[string]string{}
 	}
 	s.data.Namespaces[context] = namespace
+}
+
+// Default returns the context and namespace to start in, if one was set.
+func (s *Store) Default() (context, namespace string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Default == nil {
+		return "", "", false
+	}
+	return s.data.Default.Context, s.data.Default.Namespace, true
+}
+
+// SetDefault makes context and namespace the startup default, in memory
+// only; call Save to persist.
+func (s *Store) SetDefault(context, namespace string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Default = &startDefault{Context: context, Namespace: namespace}
+}
+
+// ClearDefault forgets the startup default, in memory only.
+func (s *Store) ClearDefault() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Default = nil
 }
 
 // History returns the remembered commands, oldest first (a copy).

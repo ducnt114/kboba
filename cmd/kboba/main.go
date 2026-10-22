@@ -18,8 +18,8 @@ import (
 func main() {
 	var (
 		kubeconfig = flag.String("kubeconfig", "", "path to the kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
-		context    = flag.String("context", "", "kubeconfig context to use (default: current-context)")
-		namespace  = flag.String("namespace", "", "namespace to start in (default: the one last used in this context, else the context's namespace)")
+		context    = flag.String("context", "", "kubeconfig context to use (default: the one set with :default, else current-context)")
+		namespace  = flag.String("namespace", "", "namespace to start in (default: the one set with :default, else the one last used in this context, else the context's namespace)")
 	)
 	flag.Parse()
 
@@ -38,13 +38,14 @@ func main() {
 	}
 	opts := ui.Options{Context: *context, Namespace: *namespace}
 
-	// Remember the last namespace per context and the ":" command history
-	// in kboba's own state file
-	// (never in the kubeconfig). Problems here must not stop kboba.
+	// Remember the last namespace per context, the ":" command history and
+	// the ":default" context/namespace in kboba's own state file (never in
+	// the kubeconfig). Problems here must not stop kboba.
 	if path, err := state.DefaultPath(); err == nil {
 		store, err := state.Open(path)
 		opts.Memory = store
 		opts.History = store
+		opts.Default = store
 		if err != nil {
 			opts.StartupWarning = err.Error()
 		}

@@ -20,15 +20,22 @@ type contextsLoadedMsg struct {
 type contextSelectedMsg struct{ name string }
 
 // contextItem adapts k8s.ContextInfo to list.Item / list.DefaultItem.
-type contextItem struct{ info k8s.ContextInfo }
+type contextItem struct {
+	info      k8s.ContextInfo
+	isDefault bool // the ":default" context
+}
 
 func (i contextItem) FilterValue() string { return i.info.Name }
 
 func (i contextItem) Title() string {
+	title := "  " + i.info.Name
 	if i.info.Current {
-		return "* " + i.info.Name
+		title = "* " + i.info.Name
 	}
-	return "  " + i.info.Name
+	if i.isDefault {
+		title += "  (default)"
+	}
+	return title
 }
 
 func (i contextItem) Description() string {
@@ -42,6 +49,9 @@ func (i contextItem) Description() string {
 // contextsView lists the kubeconfig contexts.
 type contextsView struct {
 	list list.Model
+	// defaultName is the ":default" context ("" if none); set by the root
+	// model before the contexts are loaded.
+	defaultName string
 }
 
 func newContextsView() contextsView {
@@ -66,7 +76,7 @@ func (v contextsView) Update(msg tea.Msg) (contextsView, tea.Cmd) {
 		items := make([]list.Item, len(msg.contexts))
 		current := 0
 		for i, c := range msg.contexts {
-			items[i] = contextItem{info: c}
+			items[i] = contextItem{info: c, isDefault: c.Name == v.defaultName}
 			if c.Current {
 				current = i
 			}

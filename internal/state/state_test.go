@@ -125,3 +125,32 @@ func TestHistory(t *testing.T) {
 		t.Fatal("history not persisted")
 	}
 }
+
+func TestDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	s, _ := Open(path)
+	if _, _, ok := s.Default(); ok {
+		t.Fatal("empty store should have no default")
+	}
+
+	s.SetDefault("prod", "") // all namespaces
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx, ns, ok := s2.Default(); !ok || ctx != "prod" || ns != "" {
+		t.Fatalf("default = %q %q %v", ctx, ns, ok)
+	}
+
+	s2.ClearDefault()
+	if err := s2.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s3, _ := Open(path)
+	if _, _, ok := s3.Default(); ok {
+		t.Fatal("cleared default should not come back")
+	}
+}

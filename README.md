@@ -13,6 +13,8 @@ phase-by-phase walkthrough of how and why it is built this way.
 - **Contexts**: list kubeconfig contexts and switch between them (in memory
   only, your kubeconfig is never written).
 - **Namespaces**: pick a namespace, or "all namespaces".
+- **Default context**: `:default` makes the current context and namespace
+  the ones kboba starts in next time (`:default clear` forgets it).
 - **Pods, Deployments, Services, Events, Nodes**: live tables driven by
   informers, no polling (NAMESPACE column in all-namespaces mode).
 - **CPU/MEM** columns for pods and nodes from metrics-server (polled every
@@ -70,9 +72,11 @@ make build
 ./bin/kboba [--kubeconfig PATH] [--context NAME] [--namespace NAME]
 ```
 
-Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, its
-`current-context`, and the namespace you last used in that context (else the
-context's namespace). kboba remembers that, and your `:` command history, in
+Without flags kboba uses `$KUBECONFIG` or `~/.kube/config`, and starts in
+the context and namespace set with `:default`; without a default, it uses
+the kubeconfig's `current-context` and the namespace you last used in that
+context (else the context's namespace). Flags always win. kboba remembers
+the default, the last namespace per context and your `:` command history in
 its own file,
 `~/.config/kboba/state.yaml` (`$XDG_CONFIG_HOME`); it never writes to your
 kubeconfig.
@@ -106,7 +110,9 @@ kubeconfig.
 
 Commands: `:pods` (`:po`), `:deploy` (`:dp`), `:rs`, `:svc`, `:events` (`:ev`),
 `:nodes` (`:no`), any other resource type (`:cm`, `:ingresses`,
-`:certificates.cert-manager.io`, ...), `:ctx [name]`, `:ns [name|all]`, `:q`.
+`:certificates.cert-manager.io`, ...), `:ctx [name]`, `:ns [name|all]`,
+`:default [clear]` (start in the current context/namespace next time; the
+contexts list marks it `(default)`), `:q`.
 
 In the command bar, `tab` completes the suggestion shown after the cursor
 (commands, every resource type the server has, contexts, namespaces, recent
@@ -151,7 +157,7 @@ contexts:
 cmd/kboba/          flags, wiring
 internal/k8s/       client-go only: kubeconfig, informer, logs, describe
 internal/ui/        Bubble Tea: root model + one sub-model per view
-internal/state/     kboba's own state file (last namespace per context)
+internal/state/     kboba's own state file (default, last namespaces, history)
 internal/logmux/    fan-in of many log streams into one (aggregated logs)
 hack/kind/          sample workloads, RBAC, kubeconfig generator
 ```

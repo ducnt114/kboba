@@ -37,6 +37,7 @@ Tài liệu này ghi lại kboba được xây dựng như thế nào: mỗi pha
 23. [Phase 3.2: Cây quan hệ ownerReferences](#23-phase-32-cây-quan-hệ-ownerreferences)
 24. [Phase 3.3: Describe cho mọi object](#24-phase-33-describe-cho-mọi-object)
 25. [Phase 3.4: Gợi ý và lịch sử cho lệnh `:`](#25-phase-34-gợi-ý-và-lịch-sử-cho-lệnh-)
+26. [Phase 3.5: Context/namespace mặc định khi khởi động](#26-phase-35-contextnamespace-mặc-định-khi-khởi-động)
 
 Mỗi phase là một commit riêng. Xem toàn bộ thay đổi của một phase bằng `git show <hash>`:
 
@@ -1682,6 +1683,52 @@ ti.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("ctrl+p"))
 | Discovery chậm hoặc lỗi làm command bar không có gợi ý | Mặc định gợi ý các view built-in; nạp nền, bỏ qua lỗi |
 | Trả về slice nội bộ của store cho caller | `History()` trả về bản copy |
 | `contextNames[:0]` dùng lại mảng mà các bản copy cũ của model có thể vẫn trỏ tới | Tạo slice mới |
+
+---
+
+## 26. Phase 3.5: Context/namespace mặc định khi khởi động
+
+### Mục tiêu
+- Có nhiều cluster, muốn **mỗi lần mở kboba đều vào một context + namespace cố định**, không phụ thuộc `current-context` của kubeconfig (thứ mà `kubectl config use-context` hay công cụ khác có thể đổi bất cứ lúc nào).
+- `:default` lấy context + namespace đang xem làm mặc định; `:default clear` (hoặc `:default -`) bỏ mặc định. Lưu trong `~/.config/kboba/state.yaml`, **không** ghi vào kubeconfig.
+
+### Học được gì
+- **Thứ tự ưu tiên phải viết ra rõ ràng.** Context: `--context` > `:default` > `current-context`. Namespace lúc khởi động: `--namespace` > namespace của `:default` (chỉ khi đang ở đúng context mặc định) > namespace nhớ theo context (phase 2.7) > namespace của context > `"default"`. Sau khi đã khởi động, đổi context thì chỉ dùng namespace đã nhớ như trước.
+- **"Mặc định" khác "lần cuối dùng".** Phase 2.7 nhớ tự động; phase này là lựa chọn có chủ đích của người dùng, nên được ưu tiên hơn lúc khởi động và chỉ đổi khi người dùng gõ `:default`.
+- **Trạng thái cũ không được chặn khởi động.** Context mặc định có thể đã bị xóa/đổi tên khỏi kubeconfig. Khi đó kboba kết nối lại vào `current-context` và hiện cảnh báo, thay vì kẹt ở màn hình chọn context.
+
+### Thể hiện trong code
+
+**state** (`internal/state/state.go`): `file.Default *startDefault` (`context`, `namespace`). Con trỏ để phân biệt "không có mặc định" (`nil`) với "mặc định là all namespaces" (`namespace: ""`). `Default()`, `SetDefault`, `ClearDefault` chỉ đổi trong bộ nhớ; ghi đĩa vẫn qua `Save`.
+
+```yaml
+default:
+  context: prod
+  namespace: monitoring
+```
+
+**UI** (`internal/ui/root.go`):
+- Interface `StartupDefault` khai báo phía consumer, giống `NamespaceMemory`/`CommandHistory`; `state.Store` đáp ứng luôn.
+- `startContext()`: `opts.Context`, nếu rỗng thì context của `:default`. `Init` kết nối vào đó.
+- `connectingToDefault`: bật khi lần kết nối đầu đi vào context mặc định. Nếu `clientReadyMsg` báo lỗi trong lúc cờ này bật, `handleClientReady` tắt cờ, đặt `StartupWarning` và gọi lại `connect(newClient, "")`.
+- `setDefault(arg)`: `""` lưu `m.context`/`m.namespace`, `clear`/`-` xóa, tham số khác là lỗi; ghi đĩa trong Cmd.
+- `contextsView.defaultName`: danh sách contexts đánh dấu `(default)`.
+
+### Test liên quan
+- `internal/state/state_test.go` → `TestDefault`: lưu/đọc lại `prod` + all namespaces, xóa thì không quay lại.
+- `internal/ui/root_test.go`:
+  - `TestStartsInDefault`: khởi động vào `prod/monitoring`, thắng namespace đã nhớ;
+  - `TestDefaultAllNamespaces`, `TestFlagsBeatDefault`;
+  - `TestMissingDefaultContextFallsBack`: context mặc định không còn → vào `dev`, có cảnh báo;
+  - `TestSetAndClearDefault`, `TestDefaultWithoutStateFile`.
+
+### Bẫy
+| Bẫy | Cách xử lý |
+|---|---|
+| `namespace: ""` (all) bị hiểu là "không có mặc định" | `Default` là con trỏ; `ok` riêng |
+| Namespace mặc định áp vào context khác khi `--context` khác context mặc định | Chỉ áp khi `defCtx == m.context` |
+| Context mặc định bị xóa khỏi kubeconfig → kẹt ở màn hình chọn context | Fallback về `current-context` một lần, kèm cảnh báo |
+| Namespace mặc định đè lên namespace mỗi lần đổi context | Chỉ áp ở lần kết nối đầu (`firstConnect`) |
 
 ---
 
